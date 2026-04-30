@@ -84,7 +84,7 @@ def _extract_remind_text(text: str) -> str:
         content,
         count=1,
     )
-    content = re.sub(r"(提醒一下|提醒我|提醒|叫我|别忘了|别忘|要记得|记得)", "", content, count=1)
+    content = re.sub(r"(提醒一下|提醒我|提醒|叫我|别忘了|别忘|要记得|记得)", "", content)
     content = re.sub(r"^\s*[:：,，。\s-]+", "", content).strip()
     content = content.strip("，。、：: ") or "提醒"
 
@@ -95,16 +95,20 @@ def _extract_remind_text(text: str) -> str:
 
 def _extract_time_str(text: str) -> str | None:
     """从文本中提取时间并归一化为 HH:MM"""
+    period = _detect_period_hint(text)
+
     m = re.search(r"(\d{1,2})[:：](\d{1,2})", text)
     if m:
         h = int(m.group(1))
         mm = int(m.group(2))
+        h = _apply_period_hint(h, period)
         if 0 <= h <= 23 and 0 <= mm <= 59:
             return f"{h:02d}:{mm:02d}"
 
     m = re.search(r"(\d{1,2})点(?:([0-5]?\d)分?|半)?", text)
     if m:
         h = int(m.group(1))
+        h = _apply_period_hint(h, period)
         if 0 <= h <= 23:
             token = m.group(0)
             if "半" in token:
@@ -119,6 +123,7 @@ def _extract_time_str(text: str) -> str | None:
     m = re.search(r"([零〇一二两三四五六七八九十百]{1,5})点(?:([零〇一二两三四五六七八九十百]{1,4})分?|半)?", text)
     if m:
         h = _cn_num_to_int(m.group(1))
+        h = _apply_period_hint(h, period) if h is not None else None
         if h is None or not (0 <= h <= 23):
             return None
         if "半" in m.group(0):
@@ -132,6 +137,32 @@ def _extract_time_str(text: str) -> str | None:
         if 0 <= mm <= 59:
             return f"{h:02d}:{mm:02d}"
     return None
+
+
+def _detect_period_hint(text: str) -> str | None:
+    if any(k in text for k in ["晚上", "今晚", "夜里", "夜间", "凌晨"]):
+        return "night"
+    if any(k in text for k in ["下午", "傍晚"]):
+        return "afternoon"
+    if any(k in text for k in ["中午"]):
+        return "noon"
+    if any(k in text for k in ["早上", "今早", "上午", "早晨", "清晨"]):
+        return "morning"
+    return None
+
+
+def _apply_period_hint(hour: int, period: str | None) -> int:
+    if period in ("night", "afternoon"):
+        if 1 <= hour <= 11:
+            return hour + 12
+    if period == "noon":
+        if hour == 0:
+            return 12
+        if 1 <= hour <= 10:
+            return hour + 12
+    if period == "morning" and hour == 12:
+        return 0
+    return hour
 
 
 def _cn_num_to_int(token: str) -> int | None:
