@@ -889,15 +889,21 @@ async def _remind_check_loop(handler: Handler):
 
             for r in due:
                 # 避免重复推送：用 行号 做去重
-                rid = f"{r['time']}:{r['line']}"
+                rid = f"{r['time']}:{r['line']}:{datetime.now().strftime('%Y-%m-%d')}"
                 if rid in handler._reminded_ids:
                     continue
                 handler._reminded_ids.add(rid)
 
                 msg = f"⏰ 提醒：{r['text']}"
-                from_user = handler.wx.user_id
-                ctx_token = handler.wx._context_tokens.get(from_user, "")
-                await handler.wx.send_text(msg, from_user, ctx_token)
+                # 发给微信用户（用 _context_tokens 中保存的最近用户 ID）
+                # 优先用最近聊天用户的 context_token，否则给 bot主人发
+                if handler.wx._context_tokens:
+                    # 取最近一个有 token 的用户
+                    last_user, last_token = list(handler.wx._context_tokens.items())[-1]
+                    await handler.wx.send_text(msg, last_user, last_token)
+                else:
+                    # 没有 token 时直接给用户 ID 发
+                    await handler.wx.send_text(msg, handler.wx.user_id, "")
                 print(f"[Bot] ⏰ 提醒触发: {r['text']}")
 
                 # 标记日志中该行已完成
