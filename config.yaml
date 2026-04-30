@@ -1,0 +1,32 @@
+# 微信 ClawBot → OpenCode ACP → Vault 配置
+# ==========================================
+
+# ─── OpenCode ACP ───
+opencode:
+  acp_command: "opencode"
+  cwd: "D:/Lenovo/Documents/世界树/世界树"
+  port: 0    # 0 = 自动选择端口，避免冲突
+  hostname: "127.0.0.1"
+  model: "deepseek/deepseek-v4-flash"        # 默认文本模型
+  multimodal_model: "alibaba-cn/qwen3-vl-plus"   # 多模态（图片）模型
+
+# ─── Vault 路径 ───
+vault:
+  root: "D:/Lenovo/Documents/世界树/世界树"
+  daily_log_dir: "2-Areas/习惯养成/生活日志"
+  project_dir: "1-Projects/生生"
+  task_dir: "任务系统"
+
+# ─── 生生项目分类 ───
+categories:
+  - 身体    # 体重 + 睡眠（数值追踪）
+  - 运动    # 跑步/健身/散步（行为追踪）
+  - 阅读    # 看的书 + 时长（知识追踪）
+  - 事务    # 洗衣服/买菜/做饭 等日常生活（兜底）
+
+# ─── Bot 行为 ───
+bot:
+  reply_on_record: true          # 记录后回复确认
+  reply_on_error: true           # 出错时告知用户
+  typing_indicator: true         # 处理中显示"正在输入"
+  max_reply_length: 2000         # 回复最大长度（微信限制）

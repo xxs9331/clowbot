@@ -1,0 +1,24 @@
+# 敏感文件
+.auth.json
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境和数据
+venv/
+.env
+reminders.json
+todos.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store

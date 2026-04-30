@@ -1,0 +1,12 @@
+# wechat-clawbot-vault
+# 微信 ClawBot → OpenCode ACP → Obsidian Vault
+
+# ClawBot SDK（微信消息收发）
+aiohttp>=3.9.0
+
+# 配置
+pyyaml>=6.0
+
+# 工具
+python-dateutil>=2.8.0
+cryptography>=41.0.0
