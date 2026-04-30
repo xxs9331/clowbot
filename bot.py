@@ -30,13 +30,8 @@ import yaml
 
 from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.time_utils import now, time_str
-from utils.reminders import (
-    Reminder, load_reminders, save_reminders,
-    parse_remind_command, format_reminder,
-    check_due_reminders, remove_fired_reminders,
-)
-from utils.todos import TodoItem, load_todos, save_todos, format_todo_list
 from utils.intent import detect_intent, INTENT_REMIND, INTENT_TODO, INTENT_NONE, INTENT_QUERY_TODO, INTENT_QUERY_REMIND
+from utils.log_sync import get_log_path, parse_reminders_from_log, get_due_reminders, mark_reminder_done
 
 # ─── 日志目录 ───
 LOG_DIR = Path(__file__).parent / "logs"
@@ -513,8 +508,7 @@ class Handler:
         self.cfg = config
         self.wx = wechat
         self.session_id = ""
-        self._reminders = load_reminders()  # 加载提醒列表
-        self._todos = load_todos()  # 加载待办清单
+        self._reminded_ids = set()  # 已触发的提醒（避免重复推送）
 
     async def init_session(self):
         """初始化 ACP session 并设置模型"""
@@ -607,39 +601,81 @@ class Handler:
             # ─── 自然语言意图检测 ───
             intent, data = detect_intent(text)
             if intent == INTENT_REMIND:
-                self._reminders.append(data)
-                save_reminders(self._reminders)
-                await self.wx.send_text(
-                    f"⏰ 好的，已设置提醒：{format_reminder(data)}",
-                    from_user, context_token,
-                )
-                print(f"[Bot] ⏰ 提醒: {data.text} @ {data.trigger_at}")
+                # 让 AI 写入日志的 ⏰ 提醒 节
+                await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+                try:
+                    vault = self.cfg["vault"]
+                    system_prefix = build_system_prompt(
+                        vault_root=vault["root"],
+                        daily_log_dir=vault["daily_log_dir"],
+                    )
+                    prompt = (
+                        f"{system_prefix}\n"
+                        f"用户要设置提醒：「{data}」\n"
+                        f"请在日志的「## ⏰ 提醒」节追加一行：\n"
+                        f"- [ ] {data}\n"
+                        f"如果该节不存在则创建。只回复确认信息。"
+                    )
+                    reply, _ = await self.acp.prompt(self.session_id, prompt)
+                    reply = (reply or "").strip()[:2000]
+                    await self.wx.send_text(reply or f"⏰ 已记录提醒：{data}", from_user, context_token)
+                    print(f"[Bot] ⏰ 提醒: {data}")
+                except Exception as e:
+                    print(f"[Bot] 提醒写入错误: {e}")
+                    await self.wx.send_text(f"⏰ 已记录提醒：{data}（写入可能失败，请检查）", from_user, context_token)
+                finally:
+                    await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
                 return
             elif intent == INTENT_TODO:
-                new_id = max((t.id for t in self._todos), default=0) + 1
-                item = TodoItem(text=data, tid=new_id)
-                self._todos.append(item)
-                save_todos(self._todos)
-                await self.wx.send_text(
-                    f"✅ 已添加待办：[{item.id}] {item.text}",
-                    from_user, context_token,
-                )
-                print(f"[Bot] 📋 待办: {item.text}")
+                # 让 AI 写入日志的 📋 待办 节
+                await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+                try:
+                    vault = self.cfg["vault"]
+                    system_prefix = build_system_prompt(
+                        vault_root=vault["root"],
+                        daily_log_dir=vault["daily_log_dir"],
+                    )
+                    prompt = (
+                        f"{system_prefix}\n"
+                        f"用户要添加待办：「{data}」\n"
+                        f"请在日志的「## 📋 待办」节追加一行：\n"
+                        f"- [ ] {data}\n"
+                        f"如果该节不存在则创建。只回复确认信息。"
+                    )
+                    reply, _ = await self.acp.prompt(self.session_id, prompt)
+                    reply = (reply or "").strip()[:2000]
+                    await self.wx.send_text(reply or f"✅ 已添加待办：{data}", from_user, context_token)
+                    print(f"[Bot] 📋 待办: {data}")
+                except Exception as e:
+                    print(f"[Bot] 待办写入错误: {e}")
+                    await self.wx.send_text(f"✅ 已添加待办：{data}（写入可能失败，请检查）", from_user, context_token)
+                finally:
+                    await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
                 return
             elif intent == INTENT_QUERY_TODO:
-                await self.wx.send_text(format_todo_list(self._todos), from_user, context_token)
-                print(f"[Bot] 📋 查看待办")
+                # 直接读日志文件返回
+                vault = self.cfg["vault"]
+                log_path = get_log_path(vault["root"], vault["daily_log_dir"])
+                content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+                # 提取 📋 待办 节
+                import re
+                match = re.search(r"(##\s*📋\s*待办.*?)(?=##|\Z)", content, re.DOTALL)
+                if match:
+                    await self.wx.send_text(match.group(1).strip(), from_user, context_token)
+                else:
+                    await self.wx.send_text("📭 暂无待办", from_user, context_token)
                 return
             elif intent == INTENT_QUERY_REMIND:
-                from utils.reminders import format_reminder
-                if not self._reminders:
-                    await self.wx.send_text("📭 暂无提醒", from_user, context_token)
+                # 直接读日志文件返回
+                vault = self.cfg["vault"]
+                log_path = get_log_path(vault["root"], vault["daily_log_dir"])
+                content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+                import re
+                match = re.search(r"(##\s*⏰\s*提醒.*?)(?=##|\Z)", content, re.DOTALL)
+                if match:
+                    await self.wx.send_text(match.group(1).strip(), from_user, context_token)
                 else:
-                    lines = ["⏰ 提醒列表："]
-                    for r in sorted(self._reminders, key=lambda x: x.trigger_at):
-                        lines.append(f"  [{r.id}] {format_reminder(r)}")
-                    await self.wx.send_text("\n".join(lines), from_user, context_token)
-                print(f"[Bot] ⏰ 查看提醒")
+                    await self.wx.send_text("📭 暂无提醒", from_user, context_token)
                 return
             print(f"[Bot] <<< {text[:50]}")
             await self.wx.set_typing(
@@ -701,9 +737,87 @@ class Handler:
                 context_token,
             )
         elif cmd in ["/remind", "/提醒"]:
-            await self._handle_remind(text, to, context_token)
+            # /remind 命令 → 直接走 AI 写入日志
+            await self.wx.set_typing(to_user=to, status=1, context_token=context_token)
+            try:
+                vault = self.cfg["vault"]
+                system_prefix = build_system_prompt(
+                    vault_root=vault["root"],
+                    daily_log_dir=vault["daily_log_dir"],
+                )
+                arg = text.strip()
+                for prefix in ["/remind", "/提醒"]:
+                    if arg.lower().startswith(prefix):
+                        arg = arg[len(prefix):].strip()
+                        break
+                if arg.lower() in ["list", "列表", "ls", ""]:
+                    # 查看提醒列表
+                    log_path = get_log_path(vault["root"], vault["daily_log_dir"])
+                    content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+                    import re
+                    match = re.search(r"(##\s*⏰\s*提醒.*?)(?=##|\Z)", content, re.DOTALL)
+                    if match:
+                        await self.wx.send_text(match.group(1).strip(), to, context_token)
+                    else:
+                        await self.wx.send_text("📭 暂无提醒", to, context_token)
+                else:
+                    prompt = (
+                        f"{system_prefix}\n"
+                        f"用户要设置提醒：「{arg}」\n"
+                        f"请在日志的「## ⏰ 提醒」节追加。只回复确认信息。"
+                    )
+                    reply, _ = await self.acp.prompt(self.session_id, prompt)
+                    await self.wx.send_text((reply or "").strip() or f"⏰ 已记录提醒：{arg}", to, context_token)
+            except Exception as e:
+                await self.wx.send_text(f"错误: {e}", to, context_token)
+            finally:
+                await self.wx.set_typing(to_user=to, status=2, context_token=context_token)
+
         elif cmd in ["/todo", "/待办"]:
-            await self._handle_todo(text, to, context_token)
+            await self.wx.set_typing(to_user=to, status=1, context_token=context_token)
+            try:
+                vault = self.cfg["vault"]
+                system_prefix = build_system_prompt(
+                    vault_root=vault["root"],
+                    daily_log_dir=vault["daily_log_dir"],
+                )
+                arg = text.strip()
+                for prefix in ["/todo", "/待办"]:
+                    if arg.lower().startswith(prefix):
+                        arg = arg[len(prefix):].strip()
+                        break
+                if arg.lower() in ["list", "列表", "ls", ""]:
+                    log_path = get_log_path(vault["root"], vault["daily_log_dir"])
+                    content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+                    import re
+                    match = re.search(r"(##\s*📋\s*待办.*?)(?=##|\Z)", content, re.DOTALL)
+                    if match:
+                        await self.wx.send_text(match.group(1).strip(), to, context_token)
+                    else:
+                        await self.wx.send_text("📭 暂无待办", to, context_token)
+                elif arg.lower().startswith(("done ", "完成 ")):
+                    # 完成待办 → 让 AI 更新日志
+                    prompt = (
+                        f"{system_prefix}\n"
+                        f"用户完成了待办：「{arg.split(maxsplit=1)[1] if ' ' in arg else arg}」\n"
+                        f"请在日志的「## 📋 待办」节中找到对应的条目，将 - [ ] 改为 - [x]，加上 ✅HH:MM。\n"
+                        f"只回复确认信息。"
+                    )
+                    reply, _ = await self.acp.prompt(self.session_id, prompt)
+                    await self.wx.send_text((reply or "").strip() or "✅ 已完成", to, context_token)
+                else:
+                    prompt = (
+                        f"{system_prefix}\n"
+                        f"用户要添加待办：「{arg}」\n"
+                        f"请在日志的「## 📋 待办」节追加 - [ ] {arg}。\n"
+                        f"只回复确认信息。"
+                    )
+                    reply, _ = await self.acp.prompt(self.session_id, prompt)
+                    await self.wx.send_text((reply or "").strip() or f"✅ 已添加待办：{arg}", to, context_token)
+            except Exception as e:
+                await self.wx.send_text(f"错误: {e}", to, context_token)
+            finally:
+                await self.wx.set_typing(to_user=to, status=2, context_token=context_token)
         elif cmd in ["/status", "/状态"]:
             status = "🟢 运行中" if self.acp.is_running else "🔴 已停止"
             model = self.cfg["opencode"].get("model", "?")
@@ -760,197 +874,35 @@ class Handler:
             await self.init_session()
             await self.wx.send_text("已创建新会话", to, context_token)
 
-    async def _handle_remind(self, text: str, to: str, context_token: str = ""):
-        """处理 /remind 命令"""
-        # 去掉命令前缀
-        arg = text.strip()
-        for prefix in ["/remind", "/提醒"]:
-            if arg.lower().startswith(prefix):
-                arg = arg[len(prefix):].strip()
-                break
-
-        # /remind list → 列出所有提醒
-        if arg.lower() in ["list", "列表", "ls"]:
-            if not self._reminders:
-                await self.wx.send_text("📭 暂无提醒", to, context_token)
-                return
-            lines = ["📋 提醒列表："]
-            for r in sorted(self._reminders, key=lambda x: x.trigger_at):
-                lines.append(f"  [{r.id}] {format_reminder(r)}")
-            await self.wx.send_text("\n".join(lines), to, context_token)
-            return
-
-        # /remind del <id> → 删除提醒
-        if arg.lower().startswith(("del ", "删除 ", "rm ")):
-            rid = arg.split()[-1].strip()
-            before = len(self._reminders)
-            self._reminders = [r for r in self._reminders if r.id != rid]
-            save_reminders(self._reminders)
-            deleted = before - len(self._reminders)
-            await self.wx.send_text(
-                f"{'✅ 已删除' if deleted else '❌ 未找到'} 提醒 {rid}",
-                to, context_token,
-            )
-            return
-
-        # /remind <time> <text> → 创建提醒
-        reminder = parse_remind_command(text)
-        if not reminder:
-            await self.wx.send_text(
-                "❌ 格式错误\n用法：/remind 7:30 上班\n"
-                "/remind 明天 8:00 读书\n/remind 每天 7:00 起床",
-                to, context_token,
-            )
-            return
-
-        self._reminders.append(reminder)
-        save_reminders(self._reminders)
-        await self.wx.send_text(
-            f"✅ 提醒已设置：{format_reminder(reminder)}",
-            to, context_token,
-        )
-
-    async def _handle_todo(self, text: str, to: str, context_token: str = ""):
-        """处理 /todo 命令"""
-        # 去掉命令前缀
-        arg = text.strip()
-        for prefix in ["/todo", "/待办"]:
-            if arg.lower().startswith(prefix):
-                arg = arg[len(prefix):].strip()
-                break
-
-        # /todo list → 列出待办
-        if arg.lower() in ["list", "列表", "ls", ""]:
-            await self.wx.send_text(format_todo_list(self._todos), to, context_token)
-            return
-
-        # /todo add <text> → 添加待办
-        if arg.lower().startswith(("add ", "添加 ", "新增 ")):
-            item_text = arg.split(None, 1)[1].strip() if " " in arg else ""
-            if not item_text:
-                await self.wx.send_text("❌ 请输入待办内容", to, context_token)
-                return
-            # 检查优先级标记
-            priority = ""
-            if item_text.startswith("🔴") or item_text.startswith("P0"):
-                priority = "🔴"
-                item_text = item_text[1:].strip().lstrip(" ").lstrip("P0").strip()
-            elif item_text.startswith("🟡") or item_text.startswith("P1"):
-                priority = "🟡"
-                item_text = item_text[1:].strip().lstrip(" ").lstrip("P1").strip()
-            elif item_text.startswith("🟢") or item_text.startswith("P2"):
-                priority = "🟢"
-                item_text = item_text[1:].strip().lstrip(" ").lstrip("P2").strip()
-            
-            new_id = max((t.id for t in self._todos), default=0) + 1
-            item = TodoItem(text=item_text, tid=new_id, priority=priority)
-            self._todos.append(item)
-            save_todos(self._todos)
-            pri_tag = f" {priority}" if priority else ""
-            await self.wx.send_text(
-                f"✅ 已添加：[{item.id}]{pri_tag} {item.text}",
-                to, context_token,
-            )
-            return
-
-        # /todo done <id> → 完成
-        if arg.lower().startswith(("done ", "完成 ")):
-            try:
-                tid = int(arg.split()[-1])
-            except (ValueError, IndexError):
-                await self.wx.send_text("❌ 请输入待办编号", to, context_token)
-                return
-            for t in self._todos:
-                if t.id == tid:
-                    t.done = True
-                    save_todos(self._todos)
-                    await self.wx.send_text(f"✅ 已完成：{t.text}", to, context_token)
-                    return
-            await self.wx.send_text(f"❌ 未找到编号 {tid}", to, context_token)
-            return
-
-        # /todo undo <id> → 取消完成
-        if arg.lower().startswith(("undo ", "取消 ")):
-            try:
-                tid = int(arg.split()[-1])
-            except (ValueError, IndexError):
-                await self.wx.send_text("❌ 请输入待办编号", to, context_token)
-                return
-            for t in self._todos:
-                if t.id == tid:
-                    t.done = False
-                    save_todos(self._todos)
-                    await self.wx.send_text(f"↩️ 已取消完成：{t.text}", to, context_token)
-                    return
-            await self.wx.send_text(f"❌ 未找到编号 {tid}", to, context_token)
-            return
-
-        # /todo del <id> → 删除
-        if arg.lower().startswith(("del ", "删除 ", "rm ")):
-            try:
-                tid = int(arg.split()[-1])
-            except (ValueError, IndexError):
-                await self.wx.send_text("❌ 请输入待办编号", to, context_token)
-                return
-            before = len(self._todos)
-            self._todos = [t for t in self._todos if t.id != tid]
-            save_todos(self._todos)
-            if len(self._todos) < before:
-                await self.wx.send_text(f"🗑 已删除待办 {tid}", to, context_token)
-            else:
-                await self.wx.send_text(f"❌ 未找到编号 {tid}", to, context_token)
-            return
-
-        # /todo clean → 清理已完成
-        if arg.lower() in ["clean", "清理"]:
-            before = len(self._todos)
-            self._todos = [t for t in self._todos if not t.done]
-            save_todos(self._todos)
-            cleaned = before - len(self._todos)
-            await self.wx.send_text(f"🧹 已清理 {cleaned} 项已完成待办", to, context_token)
-            return
-
-        # 简写：/todo 某事 → 添加待办
-        item = TodoItem(text=arg, tid=max((t.id for t in self._todos), default=0) + 1)
-        self._todos.append(item)
-        save_todos(self._todos)
-        await self.wx.send_text(f"✅ 已添加：[{item.id}] {item.text}", to, context_token)
-
 
 # ─── Main ───
 
 
 async def _remind_check_loop(handler: Handler):
-    """每 30 秒检查是否有到期的提醒，到期后推送消息"""
+    """每 60 秒扫描日志文件的 ⏰ 提醒节，时间到了就推送"""
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         try:
-            reminders = handler._reminders
-            due = check_due_reminders(reminders)
-            if not due:
-                continue
+            vault = handler.cfg["vault"]
+            log_path = get_log_path(vault["root"], vault["daily_log_dir"])
+            due = get_due_reminders(log_path)
 
             for r in due:
-                # 推送提醒消息
-                repeat_tag = ""
-                if r.repeat == "daily":
-                    repeat_tag = "（每日）"
-                elif r.repeat == "weekly":
-                    repeat_tag = "（每周）"
-                elif r.repeat == "weekdays":
-                    repeat_tag = "（工作日）"
+                # 避免重复推送：用 行号 做去重
+                rid = f"{r['time']}:{r['line']}"
+                if rid in handler._reminded_ids:
+                    continue
+                handler._reminded_ids.add(rid)
 
-                msg = f"⏰ 提醒{repeat_tag}：{r.text}"
-                # 发给微信用户（需要 context_token — 用空字符串，主动消息可能需要获取）
+                msg = f"⏰ 提醒：{r['text']}"
                 from_user = handler.wx.user_id
-                # 尝试获取 context_token
                 ctx_token = handler.wx._context_tokens.get(from_user, "")
                 await handler.wx.send_text(msg, from_user, ctx_token)
-                print(f"[Bot] ⏰ 提醒触发: {r.text}")
+                print(f"[Bot] ⏰ 提醒触发: {r['text']}")
 
-            # 移除已触发的提醒，重复提醒更新下次时间
-            handler._reminders = remove_fired_reminders(handler._reminders, due)
-            save_reminders(handler._reminders)
+                # 标记日志中该行已完成
+                mark_reminder_done(log_path, r["line"])
+                print(f"[Bot] ⏰ 提醒已标记完成: {r['text']}")
 
         except Exception as e:
             print(f"[Bot] 提醒检查错误: {e}")
