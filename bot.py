@@ -962,7 +962,7 @@ async def _remind_check_loop(handler: Handler):
                 if rid in handler._reminded_ids:
                     continue
 
-                msg = f"⏰ 提醒：{r['text']}"
+                msg = f"⏰ 提醒（{r['time']}）：{r['text']}"
                 if handler.wx._context_tokens:
                     last_user, last_token = list(handler.wx._context_tokens.items())[-1]
                     await handler.wx.send_text(msg, last_user, last_token)

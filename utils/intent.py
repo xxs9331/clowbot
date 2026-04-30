@@ -75,17 +75,17 @@ def _extract_remind_text(text: str) -> str:
     """
     time_str = _extract_time_str(text) or ""
 
-    # 内容：去掉时间、关键词前缀
+    # 内容：去掉时间、时段词、提醒关键词
     content = text
-    for prefix in ["提醒我", "提醒", "叫我", "别忘了", "别忘", "记得", "要记得", "提醒一下"]:
-        if content.lstrip().startswith(prefix):
-            content = content.lstrip()[len(prefix):].lstrip()
-            break
+    content = re.sub(r"^\s*(今天|今早|今晚|明早|明晚|早上|上午|中午|下午|晚上|夜里|夜间)\s*", "", content)
     content = re.sub(
-        r"^(?:\d{1,2}[:：]\d{1,2}|\d{1,2}点(?:\d{1,2}分?|半)?|[零〇一二两三四五六七八九十百]{1,5}点(?:[零〇一二两三四五六七八九十百]{1,4}分?|半)?)\s*[：:]?\s*",
+        r"(?:\d{1,2}[:：]\d{1,2}|\d{1,2}点(?:\d{1,2}分?|半)?|[零〇一二两三四五六七八九十百]{1,5}点(?:[零〇一二两三四五六七八九十百]{1,4}分?|半)?)",
         "",
         content,
-    ).strip()
+        count=1,
+    )
+    content = re.sub(r"(提醒一下|提醒我|提醒|叫我|别忘了|别忘|要记得|记得)", "", content, count=1)
+    content = re.sub(r"^\s*[:：,，。\s-]+", "", content).strip()
     content = content.strip("，。、：: ") or "提醒"
 
     if time_str:
