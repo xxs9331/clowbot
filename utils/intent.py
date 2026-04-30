@@ -16,6 +16,8 @@ from utils.reminders import Reminder
 # ─── 意图类型 ───
 INTENT_REMIND = "remind"
 INTENT_TODO = "todo"
+INTENT_QUERY_TODO = "query_todo"
+INTENT_QUERY_REMIND = "query_remind"
 INTENT_NONE = "none"
 
 # ─── 提醒意图匹配 ───
@@ -47,11 +49,27 @@ def detect_intent(text: str) -> tuple[str, object]:
     返回 (intent_type, data):
       - (INTENT_REMIND, Reminder对象)
       - (INTENT_TODO, 待办文本字符串)
+      - (INTENT_QUERY_TODO, None)     → 查看待办列表
+      - (INTENT_QUERY_REMIND, None)   → 查看提醒列表
       - (INTENT_NONE, None)
     """
     text = text.strip()
     if not text:
         return INTENT_NONE, None
+
+    # ─── 查询类意图（优先） ───
+    query_todo_kws = ["查看待办", "看待办", "待办列表", "待办清单", "有什么待办",
+                       "有什么事", "要做什么", "待办呢", "todo list", "/todo"]
+    query_remind_kws = ["查看提醒", "看提醒", "提醒列表", "有什么提醒", "提醒呢",
+                         "/remind list"]
+
+    for kw in query_todo_kws:
+        if kw in text.lower():
+            return INTENT_QUERY_TODO, None
+
+    for kw in query_remind_kws:
+        if kw in text.lower():
+            return INTENT_QUERY_REMIND, None
 
     # ─── 先检查提醒意图（优先级高） ───
     # 关键词触发：包含"提醒"或"叫我"或"别忘了"+时间

@@ -36,7 +36,7 @@ from utils.reminders import (
     check_due_reminders, remove_fired_reminders,
 )
 from utils.todos import TodoItem, load_todos, save_todos, format_todo_list
-from utils.intent import detect_intent, INTENT_REMIND, INTENT_TODO, INTENT_NONE
+from utils.intent import detect_intent, INTENT_REMIND, INTENT_TODO, INTENT_NONE, INTENT_QUERY_TODO, INTENT_QUERY_REMIND
 
 # ─── 日志目录 ───
 LOG_DIR = Path(__file__).parent / "logs"
@@ -625,6 +625,21 @@ class Handler:
                     from_user, context_token,
                 )
                 print(f"[Bot] 📋 待办: {item.text}")
+                return
+            elif intent == INTENT_QUERY_TODO:
+                await self.wx.send_text(format_todo_list(self._todos), from_user, context_token)
+                print(f"[Bot] 📋 查看待办")
+                return
+            elif intent == INTENT_QUERY_REMIND:
+                from utils.reminders import format_reminder
+                if not self._reminders:
+                    await self.wx.send_text("📭 暂无提醒", from_user, context_token)
+                else:
+                    lines = ["⏰ 提醒列表："]
+                    for r in sorted(self._reminders, key=lambda x: x.trigger_at):
+                        lines.append(f"  [{r.id}] {format_reminder(r)}")
+                    await self.wx.send_text("\n".join(lines), from_user, context_token)
+                print(f"[Bot] ⏰ 查看提醒")
                 return
             print(f"[Bot] <<< {text[:50]}")
             await self.wx.set_typing(
