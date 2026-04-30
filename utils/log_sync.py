@@ -37,7 +37,7 @@ def parse_reminders_from_log(log_path: Path) -> list[dict]:
     for i, line in enumerate(lines):
         stripped = line.strip()
         # 进入提醒节
-        if re.match(r"^##\s*⏰\s*提醒", stripped):
+        if re.match(r"^##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒", stripped):
             in_remind_section = True
             continue
         # 离开提醒节（遇到下一个 ##）
@@ -46,7 +46,10 @@ def parse_reminders_from_log(log_path: Path) -> list[dict]:
         # 解析提醒行
         if in_remind_section and stripped.startswith("- "):
             # 已触发的: - [x] 07:30：上班 ✅07:30
-            done_match = re.match(r"^- \[x\]\s*(\d{1,2}:\d{2})[：:]\s*(.+?)\s*✅", stripped)
+            done_match = re.match(
+                r"^- \[x\]\s*(?:.*?)(\d{1,2}:\d{2})[：:]\s*(.+?)\s*✅",
+                stripped,
+            )
             if done_match:
                 reminders.append({
                     "time": done_match.group(1),
@@ -55,7 +58,10 @@ def parse_reminders_from_log(log_path: Path) -> list[dict]:
                 })
                 continue
             # 未触发的: - [ ] 07:30：上班
-            pending_match = re.match(r"^- \[ \]\s*(\d{1,2}:\d{2})[：:]\s*(.+)", stripped)
+            pending_match = re.match(
+                r"^- \[ \]\s*(?:.*?)(\d{1,2}:\d{2})[：:]\s*(.+)",
+                stripped,
+            )
             if pending_match:
                 reminders.append({
                     "time": pending_match.group(1),

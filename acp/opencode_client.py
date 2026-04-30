@@ -23,8 +23,13 @@ MULTIMODAL_MODEL = "opencode-go/mimo-v2-omni"
 
 
 class OpenCodeACP:
-    def __init__(self, cwd: str = ".", port: int = 0, hostname: str = "127.0.0.1",
-                 model: str = DEFAULT_MODEL):
+    def __init__(
+        self,
+        cwd: str = ".",
+        port: int = 0,
+        hostname: str = "127.0.0.1",
+        model: str = DEFAULT_MODEL,
+    ):
         self.cwd = cwd
         self.port = port
         self.hostname = hostname
@@ -45,6 +50,7 @@ class OpenCodeACP:
         """查找 opencode 可执行文件路径（Windows 兼容）"""
         # 1. 直接可用（已在 PATH 中）
         import shutil
+
         oc = shutil.which("opencode")
         if oc:
             return oc
@@ -74,8 +80,13 @@ class OpenCodeACP:
 
         print(f"[ACP] Starting: {oc_path} acp --cwd {self.cwd}...")
         self._proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, encoding="utf-8", errors="replace", bufsize=1,
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
         await asyncio.sleep(2)
         if self._proc.poll() is not None:
@@ -87,18 +98,21 @@ class OpenCodeACP:
         self._reader_thread.start()
 
         # 握手：带 clientInfo + clientCapabilities
-        resp = await self._send_and_recv("initialize", {
-            "protocolVersion": 1,
-            "clientCapabilities": {
-                "fs": {"readTextFile": True, "writeTextFile": True},
-                "terminal": True,
+        resp = await self._send_and_recv(
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": {"readTextFile": True, "writeTextFile": True},
+                    "terminal": True,
+                },
+                "clientInfo": {
+                    "name": "clawbot",
+                    "title": "ClawBot Life Logger",
+                    "version": "1.0.0",
+                },
             },
-            "clientInfo": {
-                "name": "clawbot",
-                "title": "ClawBot Life Logger",
-                "version": "1.0.0",
-            },
-        })
+        )
         if "error" in resp:
             raise RuntimeError(f"ACP init failed: {resp['error']}")
         print(f"[ACP] started (PID={self._proc.pid}), model={self.model}")
@@ -148,16 +162,28 @@ class OpenCodeACP:
 
         if method == "session/request_permission":
             # 自动批准所有权限请求
-            self._write({"jsonrpc": "2.0", "id": msg_id,
-                         "result": {"outcome": {"outcome": "approved"}}})
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"outcome": {"outcome": "approved"}},
+                }
+            )
         elif method == "fs/read_text_file":
             fp = params.get("path", "")
             try:
                 content = open(fp, encoding="utf-8", errors="replace").read()
-                self._write({"jsonrpc": "2.0", "id": msg_id, "result": {"content": content}})
+                self._write(
+                    {"jsonrpc": "2.0", "id": msg_id, "result": {"content": content}}
+                )
             except Exception as e:
-                self._write({"jsonrpc": "2.0", "id": msg_id,
-                             "error": {"code": -32000, "message": str(e)}})
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32000, "message": str(e)},
+                    }
+                )
         elif method == "fs/write_text_file":
             fp = params.get("path", "")
             content = params.get("content", "")
@@ -167,17 +193,31 @@ class OpenCodeACP:
                     f.write(content)
                 self._write({"jsonrpc": "2.0", "id": msg_id, "result": {}})
             except Exception as e:
-                self._write({"jsonrpc": "2.0", "id": msg_id,
-                             "error": {"code": -32000, "message": str(e)}})
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32000, "message": str(e)},
+                    }
+                )
         elif method == "fs/list_directory":
             dp = params.get("path", ".")
             try:
-                entries = [{"name": e.name, "type": "directory" if e.is_dir() else "file"}
-                           for e in os.scandir(dp)]
-                self._write({"jsonrpc": "2.0", "id": msg_id, "result": {"entries": entries}})
+                entries = [
+                    {"name": e.name, "type": "directory" if e.is_dir() else "file"}
+                    for e in os.scandir(dp)
+                ]
+                self._write(
+                    {"jsonrpc": "2.0", "id": msg_id, "result": {"entries": entries}}
+                )
             except Exception as e:
-                self._write({"jsonrpc": "2.0", "id": msg_id,
-                             "error": {"code": -32000, "message": str(e)}})
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "error": {"code": -32000, "message": str(e)},
+                    }
+                )
         else:
             # 未知请求，返回空结果
             self._write({"jsonrpc": "2.0", "id": msg_id, "result": {}})
@@ -190,12 +230,19 @@ class OpenCodeACP:
 
     def _send(self, method: str, params: dict = None):
         self._msg_id += 1
-        msg = {"jsonrpc": "2.0", "id": self._msg_id, "method": method, "params": params or {}}
+        msg = {
+            "jsonrpc": "2.0",
+            "id": self._msg_id,
+            "method": method,
+            "params": params or {},
+        }
         self._proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
         self._proc.stdin.flush()
         return self._msg_id
 
-    async def _send_and_recv(self, method: str, params: dict = None, timeout: float = 120) -> dict:
+    async def _send_and_recv(
+        self, method: str, params: dict = None, timeout: float = 120
+    ) -> dict:
         """发送请求并等待匹配的响应，同时处理 agent→client 请求"""
         msg_id = self._send(method, params)
         deadline = time.time() + timeout
@@ -208,7 +255,12 @@ class OpenCodeACP:
                 continue
 
             # Agent→Client 请求 → 自动处理
-            if "method" in msg and "id" in msg and "result" not in msg and "error" not in msg:
+            if (
+                "method" in msg
+                and "id" in msg
+                and "result" not in msg
+                and "error" not in msg
+            ):
                 self._handle_agent_request(msg)
                 continue
 
@@ -253,7 +305,7 @@ class OpenCodeACP:
 
     async def _collect_prompt_response(self, msg_id: int, timeout: float = 180) -> dict:
         """收集 session/prompt 的所有响应（包含流式通知和最终结果）
-        
+
         返回:
             text: 最终回复文本（不含推理过程）
             reasoning: 推理过程文本（CoT thinking）
@@ -309,14 +361,18 @@ class OpenCodeACP:
                     if isinstance(content, dict) and content.get("type") == "text":
                         all_reasoning.append(content.get("text", ""))
                 elif su == "thinking":
-                    all_reasoning.append(update.get("textDelta", update.get("text", "")))
+                    all_reasoning.append(
+                        update.get("textDelta", update.get("text", ""))
+                    )
                 elif su in ("tool_call_update", "tool_call"):
                     pass  # 工具调用（fs 操作等），不需要收集文本
                 elif su == "end_turn":
                     break
                 else:
                     if su:
-                        _uk = list(update.keys())[:5] if isinstance(update, dict) else []
+                        _uk = (
+                            list(update.keys())[:5] if isinstance(update, dict) else []
+                        )
                         print(f"[ACP DEBUG] unhandled sessionUpdate: {su}, keys={_uk}")
                 all_notifications.append(msg)
                 continue
@@ -340,7 +396,7 @@ class OpenCodeACP:
 
     async def create_session(self, model: str = None) -> str:
         """创建 session，设置模型，返回 session_id
-        
+
         ACP 协议不支持在 session/prompt 中指定模型，
         必须通过 session/set_config_option 设置。
         模型格式: "provider/model" 如 "opencode-go/deepseek-v4-flash"
@@ -350,10 +406,12 @@ class OpenCodeACP:
         resp = await self._send_and_recv("session/new", params)
         result = resp.get("result", {})
         sid = result.get("sessionId", result.get("id", ""))
-        
+
         if not sid:
-            raise RuntimeError(f"Failed to create session: {json.dumps(resp, ensure_ascii=False)[:300]}")
-        
+            raise RuntimeError(
+                f"Failed to create session: {json.dumps(resp, ensure_ascii=False)[:300]}"
+            )
+
         # 设置模型（ACP 协议要求通过 set_config_option）
         model_str = model or self.model
         if model_str:
@@ -361,21 +419,24 @@ class OpenCodeACP:
                 await self._set_model(sid, model_str)
             except Exception as e:
                 print(f"[ACP] Warning: failed to set model: {e}")
-        
+
         return sid
 
     async def _set_model(self, session_id: str, model: str):
         """通过 session/set_config_option 设置模型
-        
+
         ACP 协议中模型通过 config option 设置:
         configId: "model"
         value: "provider/model" 格式
         """
-        resp = await self._send_and_recv("session/set_config_option", {
-            "sessionId": session_id,
-            "configId": "model",
-            "value": model,
-        })
+        resp = await self._send_and_recv(
+            "session/set_config_option",
+            {
+                "sessionId": session_id,
+                "configId": "model",
+                "value": model,
+            },
+        )
         if "error" in resp:
             print(f"[ACP] set_model error: {resp['error']}")
         else:
@@ -383,19 +444,30 @@ class OpenCodeACP:
 
     async def prompt(self, session_id: str, message: str) -> tuple:
         """发送文本消息，返回 (reply_text, reasoning_text)"""
-        msg_id = self._send("session/prompt", {
-            "sessionId": session_id,
-            "prompt": [{"type": "text", "text": message}],
-        })
+        msg_id = self._send(
+            "session/prompt",
+            {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": message}],
+            },
+        )
         collected = await self._collect_prompt_response(msg_id, timeout=180)
-        
+
         # 调试：空响应时 dump 信息
         if not collected["text"] and not collected["reasoning"]:
-            result_keys = list(collected.get("result", {}).keys()) if collected.get("result") else []
-            print(f"[ACP DEBUG] empty response! raw_count={collected.get('raw_count',0)}, "
-                  f"result_keys={result_keys}, notifications={len(collected.get('notifications',[]))}")
+            result_keys = (
+                list(collected.get("result", {}).keys())
+                if collected.get("result")
+                else []
+            )
+            print(
+                f"[ACP DEBUG] empty response! raw_count={collected.get('raw_count',0)}, "
+                f"result_keys={result_keys}, notifications={len(collected.get('notifications',[]))}"
+            )
             if collected.get("result"):
-                print(f"[ACP DEBUG] result sample: {json.dumps(collected['result'], ensure_ascii=False)[:500]}")
+                print(
+                    f"[ACP DEBUG] result sample: {json.dumps(collected['result'], ensure_ascii=False)[:500]}"
+                )
 
         # 优先用流式文本，否则用结果提取
         if collected["text"]:
@@ -404,26 +476,36 @@ class OpenCodeACP:
             reply = self._extract_text(collected["result"])
         return reply, collected["reasoning"]
 
-    async def prompt_with_image(self, session_id: str, text: str,
-                                image_bytes: bytes = b"",
-                                mime_type: str = "image/jpeg") -> tuple:
+    async def prompt_with_image(
+        self,
+        session_id: str,
+        text: str,
+        image_bytes: bytes = b"",
+        mime_type: str = "image/jpeg",
+    ) -> tuple:
         """发送文本+图片（base64 内联），返回 (reply_text, reasoning_text)
-        
+
         ACP 协议不支持 file:// 路径，需要 base64 内联图片数据。
         """
         prompt_parts = [{"type": "text", "text": text}]
         if image_bytes:
             import base64 as _b64
+
             b64_data = _b64.b64encode(image_bytes).decode("ascii")
-            prompt_parts.append({
-                "type": "image",
-                "mimeType": mime_type,
-                "data": b64_data,
-            })
-        msg_id = self._send("session/prompt", {
-            "sessionId": session_id,
-            "prompt": prompt_parts,
-        })
+            prompt_parts.append(
+                {
+                    "type": "image",
+                    "mimeType": mime_type,
+                    "data": b64_data,
+                }
+            )
+        msg_id = self._send(
+            "session/prompt",
+            {
+                "sessionId": session_id,
+                "prompt": prompt_parts,
+            },
+        )
         collected = await self._collect_prompt_response(msg_id, timeout=180)
         if collected["text"]:
             reply = collected["text"]
@@ -432,8 +514,9 @@ class OpenCodeACP:
         return reply, collected["reasoning"]
 
 
-def build_system_prompt(vault_root: str, daily_log_dir: str,
-                         project_dir: str = "", task_dir: str = "") -> str:
+def build_system_prompt(
+    vault_root: str, daily_log_dir: str, project_dir: str = "", task_dir: str = ""
+) -> str:
     return f"""你是"生生项目"的生活日志助手。只处理生活相关的事，不处理工作/学术任务。
 
 ## 核心规则

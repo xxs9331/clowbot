@@ -16,12 +16,14 @@ iLink 协议参考：
 """
 
 import asyncio
+import heapq
 import json
 import os
 import random
 import uuid
 import base64
 import sys
+from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -31,7 +33,7 @@ import yaml
 from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.time_utils import now, time_str
 from utils.intent import detect_intent, INTENT_REMIND, INTENT_TODO, INTENT_NONE, INTENT_QUERY_TODO, INTENT_QUERY_REMIND
-from utils.log_sync import get_log_path, parse_reminders_from_log, get_due_reminders, mark_reminder_done
+from utils.log_sync import get_log_path, parse_reminders_from_log, mark_reminder_done
 
 # ─── 日志目录 ───
 LOG_DIR = Path(__file__).parent / "logs"
@@ -509,11 +511,16 @@ class Handler:
         self.wx = wechat
         self.session_id = ""
         self._reminded_ids = set()  # 已触发的提醒（避免重复推送）
+        self._reminder_refresh = asyncio.Event()
 
     async def init_session(self):
         """初始化 ACP session 并设置模型"""
         self.session_id = await self.acp.create_session()
         print(f"[Bot] session: {self.session_id}")
+
+    def notify_reminder_refresh(self):
+        """提醒列表发生变化时，唤醒调度器重建索引"""
+        self._reminder_refresh.set()
 
     async def handle(self, msg: dict):
         text = msg.get("text", "").strip()
@@ -620,6 +627,7 @@ class Handler:
                     reply = (reply or "").strip()[:2000]
                     await self.wx.send_text(reply or f"⏰ 已记录提醒：{data}", from_user, context_token)
                     print(f"[Bot] ⏰ 提醒: {data}")
+                    self.notify_reminder_refresh()
                 except Exception as e:
                     print(f"[Bot] 提醒写入错误: {e}")
                     await self.wx.send_text(f"⏰ 已记录提醒：{data}（写入可能失败，请检查）", from_user, context_token)
@@ -659,7 +667,11 @@ class Handler:
                 content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
                 # 提取 📋 待办 节
                 import re
-                match = re.search(r"(##\s*📋\s*待办.*?)(?=##|\Z)", content, re.DOTALL)
+                match = re.search(
+                    r"(##\s*(?:\d+(?:\.\d+)?\s+)?📋\s*待办.*?)(?=##|\Z)",
+                    content,
+                    re.DOTALL,
+                )
                 if match:
                     await self.wx.send_text(match.group(1).strip(), from_user, context_token)
                 else:
@@ -671,7 +683,11 @@ class Handler:
                 log_path = get_log_path(vault["root"], vault["daily_log_dir"])
                 content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
                 import re
-                match = re.search(r"(##\s*⏰\s*提醒.*?)(?=##|\Z)", content, re.DOTALL)
+                match = re.search(
+                    r"(##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒.*?)(?=##|\Z)",
+                    content,
+                    re.DOTALL,
+                )
                 if match:
                     await self.wx.send_text(match.group(1).strip(), from_user, context_token)
                 else:
@@ -755,7 +771,11 @@ class Handler:
                     log_path = get_log_path(vault["root"], vault["daily_log_dir"])
                     content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
                     import re
-                    match = re.search(r"(##\s*⏰\s*提醒.*?)(?=##|\Z)", content, re.DOTALL)
+                    match = re.search(
+                        r"(##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒.*?)(?=##|\Z)",
+                        content,
+                        re.DOTALL,
+                    )
                     if match:
                         await self.wx.send_text(match.group(1).strip(), to, context_token)
                     else:
@@ -768,6 +788,7 @@ class Handler:
                     )
                     reply, _ = await self.acp.prompt(self.session_id, prompt)
                     await self.wx.send_text((reply or "").strip() or f"⏰ 已记录提醒：{arg}", to, context_token)
+                    self.notify_reminder_refresh()
             except Exception as e:
                 await self.wx.send_text(f"错误: {e}", to, context_token)
             finally:
@@ -790,7 +811,11 @@ class Handler:
                     log_path = get_log_path(vault["root"], vault["daily_log_dir"])
                     content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
                     import re
-                    match = re.search(r"(##\s*📋\s*待办.*?)(?=##|\Z)", content, re.DOTALL)
+                    match = re.search(
+                        r"(##\s*(?:\d+(?:\.\d+)?\s+)?📋\s*待办.*?)(?=##|\Z)",
+                        content,
+                        re.DOTALL,
+                    )
                     if match:
                         await self.wx.send_text(match.group(1).strip(), to, context_token)
                     else:
@@ -878,40 +903,83 @@ class Handler:
 # ─── Main ───
 
 
-async def _remind_check_loop(handler: Handler):
-    """每 60 秒扫描日志文件的 ⏰ 提醒节，时间到了就推送"""
-    while True:
-        await asyncio.sleep(60)
+def _build_today_reminder_heap(handler: Handler):
+    """从今日日志提取未完成提醒，构建最小堆（按触发时间）"""
+    vault = handler.cfg["vault"]
+    log_path = get_log_path(vault["root"], vault["daily_log_dir"])
+    today = datetime.now().date()
+    heap = []
+    for r in parse_reminders_from_log(log_path):
+        if r["done"]:
+            continue
         try:
-            vault = handler.cfg["vault"]
-            log_path = get_log_path(vault["root"], vault["daily_log_dir"])
-            due = get_due_reminders(log_path)
+            hh, mm = r["time"].split(":")
+            due_dt = datetime.combine(today, datetime.min.time()).replace(
+                hour=int(hh), minute=int(mm)
+            )
+        except Exception:
+            continue
+        rid = f"{today.isoformat()}:{r['line']}:{r['time']}"
+        heapq.heappush(heap, (due_dt, rid, r))
+    return log_path, heap
 
-            for r in due:
-                # 避免重复推送：用 行号 做去重
-                rid = f"{r['time']}:{r['line']}:{datetime.now().strftime('%Y-%m-%d')}"
+
+async def _remind_check_loop(handler: Handler):
+    """轻量调度器：只关注今日日志，睡眠到最近到期提醒"""
+    last_day = None
+    reminder_heap = []
+    log_path = None
+
+    while True:
+        try:
+            now_dt = datetime.now()
+            today = now_dt.date()
+
+            if last_day != today or handler._reminder_refresh.is_set() or not reminder_heap:
+                log_path, reminder_heap = _build_today_reminder_heap(handler)
+                handler._reminder_refresh.clear()
+                last_day = today
+                print(f"[Bot] 提醒索引已加载: {len(reminder_heap)} 条，日期={today.isoformat()}")
+
+            if not reminder_heap:
+                # 无提醒时阻塞等待新提醒写入或每日重启
+                await handler._reminder_refresh.wait()
+                continue
+
+            next_due_dt = reminder_heap[0][0]
+            sleep_seconds = max((next_due_dt - now_dt).total_seconds(), 0.0)
+
+            try:
+                # 新提醒写入时提前唤醒并重建索引
+                await asyncio.wait_for(handler._reminder_refresh.wait(), timeout=sleep_seconds)
+                continue
+            except asyncio.TimeoutError:
+                pass
+
+            now_dt = datetime.now()
+            while reminder_heap and reminder_heap[0][0] <= now_dt:
+                _, rid, r = heapq.heappop(reminder_heap)
                 if rid in handler._reminded_ids:
                     continue
-                handler._reminded_ids.add(rid)
 
                 msg = f"⏰ 提醒：{r['text']}"
-                # 发给微信用户（用 _context_tokens 中保存的最近用户 ID）
-                # 优先用最近聊天用户的 context_token，否则给 bot主人发
                 if handler.wx._context_tokens:
-                    # 取最近一个有 token 的用户
                     last_user, last_token = list(handler.wx._context_tokens.items())[-1]
                     await handler.wx.send_text(msg, last_user, last_token)
                 else:
-                    # 没有 token 时直接给用户 ID 发
                     await handler.wx.send_text(msg, handler.wx.user_id, "")
                 print(f"[Bot] ⏰ 提醒触发: {r['text']}")
 
-                # 标记日志中该行已完成
-                mark_reminder_done(log_path, r["line"])
-                print(f"[Bot] ⏰ 提醒已标记完成: {r['text']}")
+                ok = mark_reminder_done(log_path, r["line"])
+                if ok:
+                    handler._reminded_ids.add(rid)
+                    print(f"[Bot] ⏰ 提醒已标记完成: {r['text']}")
+                else:
+                    print(f"[Bot] ⏰ 提醒标记失败: {r['text']}")
 
         except Exception as e:
             print(f"[Bot] 提醒检查错误: {e}")
+            await asyncio.sleep(3)
 
 
 async def _auto_archive(acp: OpenCodeACP, config: dict, handler: Handler):
@@ -946,70 +1014,86 @@ async def main():
     config = load_config()
     oc_cfg = config.get("opencode", {})
 
-    # 1. 启动 ACP
     acp = OpenCodeACP(
         cwd=oc_cfg.get("cwd", "."),
         port=oc_cfg.get("port", 0),
         hostname=oc_cfg.get("hostname", "127.0.0.1"),
         model=oc_cfg.get("model", "deepseek/deepseek-v4-flash"),
     )
-    await acp.start()
-
-    # 2. 微信连接
     wx = ClawBotClient(config.get("bot", {}))
-    await wx.start()
-    if not wx._load_auth():
-        if not await wx.login():
-            print("[Bot] 微信登录失败，退出")
-            await acp.stop()
-            return
-    else:
-        print(f"[Bot] Loaded auth (bot_id={wx.bot_id[:8]}...)")
+    archive_task = None
+    remind_task = None
 
-    # 3. Handler + session
-    h = Handler(acp, config, wx)
-    await h.init_session()
+    try:
+        # 1. 启动 ACP
+        await acp.start()
 
-    # 启动自动归档调度器（每天凌晨 2 点）
-    archive_task = asyncio.create_task(_auto_archive(acp, config, h))
-
-    # 启动提醒检查循环（每 30 秒检查一次）
-    remind_task = asyncio.create_task(_remind_check_loop(h))
-
-    print(f"[Bot] Ready ✓ 微信生活日志助手已启动")
-    print(f"[Bot] 提醒数: {len(h._reminders)}")
-
-    # 4. 消息循环（支持 token 过期重连）
-    while True:
-        try:
-            async for msg in wx.poll_messages():
-                asyncio.create_task(h.handle(msg))
-        except KeyboardInterrupt:
-            print("\n[Bot] Exiting...")
-            break
-        except Exception as e:
-            print(f"[Bot] 消息循环异常: {e}")
-
-        # poll_messages 退出 → 可能是 401（token 过期）
-        # 检查是否需要重新登录
-        if not wx.token:
-            print("[Bot] Token 失效，重新登录...")
+        # 2. 微信连接
+        await wx.start()
+        if not wx._load_auth():
             if not await wx.login():
-                print("[Bot] 重新登录失败，退出")
-                break
-            archive_task.cancel()
-            h = Handler(acp, config, wx)
-            await h.init_session()
-            archive_task = asyncio.create_task(_auto_archive(acp, config, h))
-            print("[Bot] Ready ✓ 重新连接成功")
+                print("[Bot] 微信登录失败，退出")
+                return
         else:
-            # 其他异常，短暂等待后重试
-            print("[Bot] 5秒后重试...")
-            await asyncio.sleep(5)
+            print(f"[Bot] Loaded auth (bot_id={wx.bot_id[:8]}...)")
 
-    # 退出清理
-    await wx.stop()
-    await acp.stop()
+        # 3. Handler + session
+        h = Handler(acp, config, wx)
+        await h.init_session()
+
+        # 启动自动归档调度器（每天凌晨 2 点）
+        archive_task = asyncio.create_task(_auto_archive(acp, config, h))
+
+        # 启动提醒检查循环（每 30 秒检查一次）
+        remind_task = asyncio.create_task(_remind_check_loop(h))
+
+        print(f"[Bot] Ready ✓ 微信生活日志助手已启动")
+        print(f"[Bot] 已提醒缓存数: {len(h._reminded_ids)}")
+
+        # 4. 消息循环（支持 token 过期重连）
+        while True:
+            try:
+                async for msg in wx.poll_messages():
+                    asyncio.create_task(h.handle(msg))
+            except KeyboardInterrupt:
+                print("\n[Bot] Exiting...")
+                break
+            except Exception as e:
+                print(f"[Bot] 消息循环异常: {e}")
+
+            # poll_messages 退出 → 可能是 401（token 过期）
+            # 检查是否需要重新登录
+            if not wx.token:
+                print("[Bot] Token 失效，重新登录...")
+                if not await wx.login():
+                    print("[Bot] 重新登录失败，退出")
+                    break
+
+                for task in (archive_task, remind_task):
+                    if task:
+                        task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await task
+
+                h = Handler(acp, config, wx)
+                await h.init_session()
+                archive_task = asyncio.create_task(_auto_archive(acp, config, h))
+                remind_task = asyncio.create_task(_remind_check_loop(h))
+                print("[Bot] Ready ✓ 重新连接成功")
+            else:
+                # 其他异常，短暂等待后重试
+                print("[Bot] 5秒后重试...")
+                await asyncio.sleep(5)
+    finally:
+        for task in (archive_task, remind_task):
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        with suppress(Exception):
+            await wx.stop()
+        with suppress(Exception):
+            await acp.stop()
 
 
 if __name__ == "__main__":

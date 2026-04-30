@@ -4,7 +4,7 @@
 """
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ─── 意图类型 ───
 INTENT_REMIND = "remind"        # 设置提醒
@@ -44,7 +44,7 @@ def detect_intent(text: str) -> tuple[str, str]:
     # ─── 提醒意图 ───
     # "提醒我7:30上班" / "7:30提醒我上班" / "今晚9点提醒我" / "叫我明天8点起床"
     has_remind_keyword = any(kw in text for kw in ["提醒", "叫我", "别忘了", "别忘"])
-    has_time = bool(re.search(r"\d{1,2}[:点]\d{0,2}", text))
+    has_time = _extract_time_str(text) is not None
 
     if has_remind_keyword and has_time:
         reminder_text = _extract_remind_text(text)
@@ -73,38 +73,7 @@ def _extract_remind_text(text: str) -> str:
     返回格式: "07:30：上班" / "明天 08:00：微信读书" / "每天 07:00：起床"
     解析不清时原样返回，让 AI 自己理解。
     """
-    original = text
-    now = datetime.now()
-
-    # 重复模式
-    repeat_prefix = ""
-    if "每天" in text or "每日" in text:
-        repeat_prefix = "每天 "
-        text = text.replace("每天", "").replace("每日", "")
-    elif "工作日" in text:
-        repeat_prefix = "工作日 "
-        text = text.replace("工作日", "")
-
-    # 日期修饰
-    date_prefix = ""
-    for word, dp in [("明晚", "明天 "), ("今晚", ""), ("明天", "明天 "), ("后天", "后天 ")]:
-        if word in text:
-            date_prefix = dp
-            text = text.replace(word, "", 1)
-            break
-
-    # 时间
-    time_match = re.search(r"(\d{1,2})[:点](\d{1,2})分?", text)
-    if time_match:
-        time_str = f"{int(time_match.group(1)):02d}:{int(time_match.group(2)):02d}"
-    else:
-        half_match = re.search(r"(\d{1,2})点半?", text)
-        if half_match:
-            h = int(half_match.group(1))
-            m = 30 if "半" in half_match.group(0) else 0
-            time_str = f"{h:02d}:{m:02d}"
-        else:
-            time_str = ""
+    time_str = _extract_time_str(text) or ""
 
     # 内容：去掉时间、关键词前缀
     content = text
@@ -112,11 +81,75 @@ def _extract_remind_text(text: str) -> str:
         if content.lstrip().startswith(prefix):
             content = content.lstrip()[len(prefix):].lstrip()
             break
-    content = re.sub(r"^\d{1,2}[:点]\d{0,2}分?半?\s*[：:]?\s*", "", content).strip()
+    content = re.sub(
+        r"^(?:\d{1,2}[:：]\d{1,2}|\d{1,2}点(?:\d{1,2}分?|半)?|[零〇一二两三四五六七八九十百]{1,5}点(?:[零〇一二两三四五六七八九十百]{1,4}分?|半)?)\s*[：:]?\s*",
+        "",
+        content,
+    ).strip()
     content = content.strip("，。、：: ") or "提醒"
 
-    # 组装: "每天 明天 07:30：上班"
-    prefix = f"{repeat_prefix}{date_prefix}{time_str}"
-    if prefix:
-        return f"{prefix}：{content}"
+    if time_str:
+        return f"{time_str}：{content}"
     return content
+
+
+def _extract_time_str(text: str) -> str | None:
+    """从文本中提取时间并归一化为 HH:MM"""
+    m = re.search(r"(\d{1,2})[:：](\d{1,2})", text)
+    if m:
+        h = int(m.group(1))
+        mm = int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mm <= 59:
+            return f"{h:02d}:{mm:02d}"
+
+    m = re.search(r"(\d{1,2})点(?:([0-5]?\d)分?|半)?", text)
+    if m:
+        h = int(m.group(1))
+        if 0 <= h <= 23:
+            token = m.group(0)
+            if "半" in token:
+                mm = 30
+            elif m.group(2) is not None:
+                mm = int(m.group(2))
+            else:
+                mm = 0
+            if 0 <= mm <= 59:
+                return f"{h:02d}:{mm:02d}"
+
+    m = re.search(r"([零〇一二两三四五六七八九十百]{1,5})点(?:([零〇一二两三四五六七八九十百]{1,4})分?|半)?", text)
+    if m:
+        h = _cn_num_to_int(m.group(1))
+        if h is None or not (0 <= h <= 23):
+            return None
+        if "半" in m.group(0):
+            mm = 30
+        elif m.group(2):
+            mm = _cn_num_to_int(m.group(2))
+            if mm is None:
+                return None
+        else:
+            mm = 0
+        if 0 <= mm <= 59:
+            return f"{h:02d}:{mm:02d}"
+    return None
+
+
+def _cn_num_to_int(token: str) -> int | None:
+    token = token.replace("〇", "零").replace("两", "二")
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if token in digits:
+        return digits[token]
+    if token == "十":
+        return 10
+    if len(token) == 2 and token[0] == "十" and token[1] in digits:
+        return 10 + digits[token[1]]
+    if len(token) == 2 and token[1] == "十" and token[0] in digits:
+        return digits[token[0]] * 10
+    if len(token) == 3 and token[1] == "十" and token[0] in digits and token[2] in digits:
+        return digits[token[0]] * 10 + digits[token[2]]
+    if all(ch in digits for ch in token):
+        value = 0
+        for ch in token:
+            value = value * 10 + digits[ch]
+        return value
+    return None
