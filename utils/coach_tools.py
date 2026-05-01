@@ -71,7 +71,7 @@ def get_domain_tool(domain: str) -> str:
 def build_coach_write_prompt(
     domain: str,
     *,
-    system_prefix: str,
+    system_prefix: str = "",
     vault_root: str,
     daily_log_dir: str,
     payload: dict[str, Any],
@@ -82,7 +82,7 @@ def build_coach_write_prompt(
 
     参数：
         domain: "todo" | "record" | "remind"
-        system_prefix: build_system_prompt(...) 的输出
+        system_prefix: 可选系统前缀（通常在 session 初始化阶段注入，留空可避免重复注入）
         vault_root / daily_log_dir: 用于解析 today_log 与 SKILL 路径
         payload: 含 op + 业务字段（规则见对应 SKILL.md）
         output_contract: 给模型的回复格式短句
@@ -100,8 +100,9 @@ def build_coach_write_prompt(
         "payload": payload,
         "output_contract": output_contract,
     }
+    prefix = f"{system_prefix}\n\n" if system_prefix else ""
     return (
-        f"{system_prefix}\n\n"
+        f"{prefix}"
         f"## ClawBot · {meta['label']} Vault 工具调用\n"
         "步骤：1) 用 fs/read_text_file 读取 `skill_path`（对应 SKILL 全文）。\n"
         f"2) 再按该 SKILL 操作 `today_log` 内的 `{meta['section']}` 章节。\n"

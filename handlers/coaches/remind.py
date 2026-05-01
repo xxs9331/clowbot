@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from acp.opencode_client import build_system_prompt
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
 from utils.tool_names import DOMAIN_REMIND, TOOL_REMIND_ADD
@@ -32,7 +31,6 @@ class RemindCoachMixin:
         v = self.cfg["vault"]
         prompt = build_coach_write_prompt(
             DOMAIN_REMIND,
-            system_prefix=build_system_prompt(v["root"], v["daily_log_dir"]),
             vault_root=v["root"],
             daily_log_dir=v["daily_log_dir"],
             payload={
@@ -46,7 +44,7 @@ class RemindCoachMixin:
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
             out, _ = await self.acp.prompt(
-                self.session_id, prompt, trace_tag="vault_remind_add"
+                self.remind_session_id, prompt, trace_tag="vault_remind_add"
             )
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)

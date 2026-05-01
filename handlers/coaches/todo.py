@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from acp.opencode_client import build_system_prompt
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
 from utils.flow_log import log_flow_event
@@ -74,7 +73,6 @@ class TodoCoachMixin:
         v = self.cfg["vault"]
         return build_coach_write_prompt(
             DOMAIN_TODO,
-            system_prefix=build_system_prompt(v["root"], v["daily_log_dir"]),
             vault_root=v["root"],
             daily_log_dir=v["daily_log_dir"],
             payload=payload,
@@ -107,13 +105,13 @@ class TodoCoachMixin:
         msg = self._write_todo_prompt(
             {"op": "rewrite_section_flat", "flat_order": ordered_tasks}
         )
-        await self.acp.prompt(self.session_id, msg, trace_tag="vault_reorder_todo")
+        await self.acp.prompt(self.todo_session_id, msg, trace_tag="vault_reorder_todo")
 
     async def _vault_tool_remove_subitem(self, label: str) -> None:
         msg = self._write_todo_prompt(
             {"op": "remove_subitem", "remove_label": label}
         )
-        await self.acp.prompt(self.session_id, msg, trace_tag="vault_abandon_item")
+        await self.acp.prompt(self.todo_session_id, msg, trace_tag="vault_abandon_item")
 
     # ─── 模板待办展开（Python 读模板，支持模板内容随时改）───
 
@@ -367,7 +365,7 @@ class TodoCoachMixin:
                 {"op": "merge_new_items", "new_items_ordered": tasks}
             )
             vault_reply, _ = await self.acp.prompt(
-                self.session_id, prompt, trace_tag="vault_append_todo"
+                self.todo_session_id, prompt, trace_tag="vault_append_todo"
             )
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
@@ -407,12 +405,23 @@ class TodoCoachMixin:
                     "completed_at_hhmm": now_hm,
                 }
             )
-            await self.acp.prompt(self.session_id, prompt, trace_tag="vault_mark_done")
+            await self.acp.prompt(self.todo_session_id, prompt, trace_tag="vault_mark_done")
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
-        self._advance_queue_task(from_user)
-        progress_text = f"（进度 {completed_count}/{total_count}）" if total_count > 0 else ""
-        done_reply = reply or f"做得好，{current_task}已完成。{progress_text}"
+        next_task = self._advance_queue_task(from_user)
+        progress_text = f"({completed_count}/{total_count})" if total_count > 0 else ""
+        done_reply = (reply or "").strip()
+        if not done_reply:
+            done_reply = (
+                f"✅ {current_task}完成 {progress_text}。"
+                if progress_text
+                else f"✅ {current_task}完成。"
+            )
+        if next_task and ("下一个：" not in done_reply and "做完了吗" not in done_reply):
+            done_reply = f"{done_reply}下一个：{next_task}，做完了吗？"
+        elif (not next_task) and total_count > 0 and completed_count >= total_count:
+            if "全部完成" not in done_reply:
+                done_reply = f"{done_reply}全部完成了。"
         await self.wx.send_text(done_reply, from_user, context_token)
         return True
 

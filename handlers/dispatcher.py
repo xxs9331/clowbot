@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from typing import Any, Awaitable, Callable
 
-from acp.opencode_client import build_todo_coach_skill_binding
 from utils.refresh_hooks import run_post_write_hooks
 from utils.tool_names import (
     LEGACY_TOOL_ALIASES,  # noqa: F401  导入便于重导出
@@ -91,8 +90,6 @@ class DispatcherMixin:
         current_task = self._get_current_queue_task(user_id)
         remaining = self._get_remaining_queue_tasks(user_id)
         pending_reorder = self._pending_reorders.get(user_id, [])
-        vault_root = self.cfg["vault"]["root"]
-        skill_ctx = build_todo_coach_skill_binding(vault_root)
         hint_block = ""
         if isinstance(intent_hint, dict) and intent_hint:
             try:
@@ -103,7 +100,6 @@ class DispatcherMixin:
             except Exception:
                 hint_block = ""
         prompt = (
-            f"{skill_ctx}\n\n"
             f"{hint_block}"
             "你是微信个人助手。待办话术与意图划分以 todo-coach 为准；生活记录以 record-coach 为准；"
             "提醒以 remind-coach 为准。只输出 JSON，不要其它内容。\n"
@@ -134,7 +130,7 @@ class DispatcherMixin:
             f"- user_message: {text}\n"
         )
         reply, _ = await self.acp.prompt(
-            self.session_id, prompt, trace_tag="unified_decide"
+            self.unified_session_id, prompt, trace_tag="unified_decide"
         )
         decision = self._extract_json_object(reply)
         if not isinstance(decision, dict):

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from acp.opencode_client import build_system_prompt
 from config import _log_reasoning
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
@@ -32,7 +31,6 @@ class RecordCoachMixin:
         v = self.cfg["vault"]
         prompt = build_coach_write_prompt(
             DOMAIN_RECORD,
-            system_prefix=build_system_prompt(v["root"], v["daily_log_dir"]),
             vault_root=v["root"],
             daily_log_dir=v["daily_log_dir"],
             payload={
@@ -47,7 +45,7 @@ class RecordCoachMixin:
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
             out, reasoning = await self.acp.prompt(
-                self.session_id, prompt, trace_tag="vault_record_add"
+                self.record_session_id, prompt, trace_tag="vault_record_add"
             )
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)

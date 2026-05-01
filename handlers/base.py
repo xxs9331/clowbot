@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 
-from acp.opencode_client import OpenCodeACP
+from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.intent import (
     INTENT_QUERY_REMIND,
     INTENT_QUERY_TODO,
@@ -55,6 +55,10 @@ class Handler(
         self.cfg = config
         self.wx = wechat
         self.session_id: str = ""
+        self.unified_session_id: str = ""
+        self.todo_session_id: str = ""
+        self.record_session_id: str = ""
+        self.remind_session_id: str = ""
         self._reminded_ids: set[str] = set()
         self._reminder_refresh: asyncio.Event = asyncio.Event()
         self._todo_queues: dict[str, dict] = {}
@@ -63,9 +67,48 @@ class Handler(
         self._local_view_debounce_sec: float = 2.0
 
     async def init_session(self):
-        """初始化 ACP session 并设置模型"""
-        self.session_id = await self.acp.create_session()
-        print(f"[Bot] session: {self.session_id}")
+        """初始化 ACP sessions（按域分流，减少跨域上下文污染）。"""
+        self.unified_session_id = await self.acp.create_session()
+        self.todo_session_id = await self.acp.create_session()
+        self.record_session_id = await self.acp.create_session()
+        self.remind_session_id = await self.acp.create_session()
+
+        # 域会话启动时一次性注入角色约束，后续写盘只传 JSON envelope。
+        v = self.cfg["vault"]
+        sys_prompt = build_system_prompt(v["root"], v["daily_log_dir"])
+        await asyncio.gather(
+            self.acp.prompt(
+                self.todo_session_id,
+                (
+                    f"{sys_prompt}\n\n"
+                    "这是待办域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
+                ),
+                trace_tag="prime_todo",
+            ),
+            self.acp.prompt(
+                self.record_session_id,
+                (
+                    f"{sys_prompt}\n\n"
+                    "这是记录域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
+                ),
+                trace_tag="prime_record",
+            ),
+            self.acp.prompt(
+                self.remind_session_id,
+                (
+                    f"{sys_prompt}\n\n"
+                    "这是提醒域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
+                ),
+                trace_tag="prime_remind",
+            ),
+        )
+        # 兼容旧字段：默认代表 unified 会话
+        self.session_id = self.unified_session_id
+        print(
+            "[Bot] sessions:"
+            f" unified={self.unified_session_id} todo={self.todo_session_id}"
+            f" record={self.record_session_id} remind={self.remind_session_id}"
+        )
 
     def notify_reminder_refresh(self):
         """提醒列表发生变化时，唤醒调度器重建索引"""

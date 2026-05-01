@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from utils.route_fast import build_fast_unified_decision
-from utils.tool_names import TOOL_DECISION_NONE
+from utils.tool_names import TOOL_DECISION_NONE, TOOL_TODO_DONE_CURRENT
 
 
 def _empty_queues():
@@ -40,3 +40,9 @@ def test_meta_clarify_skipped_when_no_active_queue():
     # 同样避免 "待办" 字样让 todo 分支抢答；纯 meta 句在无队列时应返回 None
     d = build_fast_unified_decision("怎么走 SKILL？", "u1", _empty_queues())
     assert d is None
+
+
+def test_done_shortcut_when_active_queue():
+    d = build_fast_unified_decision("OK", "u1", _active_queue())
+    assert d is not None
+    assert d["tool"] == TOOL_TODO_DONE_CURRENT

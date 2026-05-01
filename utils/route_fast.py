@@ -6,10 +6,14 @@ tool 名常量唯一来源是 utils.tool_names；本文件不再保留字面量�
 
 import re
 
-from utils.tool_names import TOOL_DECISION_NONE
+from utils.tool_names import TOOL_DECISION_NONE, TOOL_TODO_DONE_CURRENT
 
 _META_TODO_CLARIFY = re.compile(
     r"(skill|skills|SKILL|技能|路由|元问题|怎么判定|调用.*skill|待办.*skill|走.*skill)",
+    re.I,
+)
+_FAST_TODO_DONE = re.compile(
+    r"(做完了|做完|搞定了|搞定|完成了|好了|ok|OK|Ok|okk|OKK|行了|可以了|已完成)",
     re.I,
 )
 
@@ -34,11 +38,16 @@ def build_fast_unified_decision(
     其它 todo/record/remind 意图统一交由小模型分类层 + unified 决策层。
     """
 
-    if _has_active_todo_queue(user_id, todo_queues) and _META_TODO_CLARIFY.search(text):
+    has_active_queue = _has_active_todo_queue(user_id, todo_queues)
+    if has_active_queue and _META_TODO_CLARIFY.search(text):
         return {
             "tool": TOOL_DECISION_NONE,
             "payload": {},
             "reply": "催办和动作判定由 OpenCode 工程里加载的待办 SKILL 管；我这边按当前内存队列推进。",
         }
+
+    # 队列推进高频确认句走确定性快通道，避免每次都触发慢速 LLM 判定。
+    if has_active_queue and _FAST_TODO_DONE.search(text or ""):
+        return {"tool": TOOL_TODO_DONE_CURRENT, "payload": {}, "reply": ""}
 
     return None
