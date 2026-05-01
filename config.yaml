@@ -7,6 +7,7 @@ opencode:
   cwd: "D:/Lenovo/Documents/世界树/世界树"
   port: 0    # 0 = 自动选择端口，避免冲突
   hostname: "127.0.0.1"
+  max_tokens: 500
   model: "deepseek/deepseek-v4-flash"        # 默认文本模型
   multimodal_model: "alibaba-cn/qwen3-vl-plus"   # 多模态（图片）模型
 

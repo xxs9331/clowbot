@@ -89,12 +89,14 @@ class _StubACP:
         self._reply = reply
         self.model = model
         self._created = 0
+        self.prompt_calls = []
 
     async def create_session(self, model=None):
         self._created += 1
         return f"sid-{self._created}"
 
     async def prompt(self, sid, msg, *, trace_tag="x"):
+        self.prompt_calls.append({"sid": sid, "msg": msg, "trace_tag": trace_tag})
         return self._reply, ""
 
 
@@ -127,6 +129,10 @@ def test_classify_intent_session_reused():
 
     _run(_case())
     assert acp._created == 1, "intent session 应在同一 acp 上复用"
+    prime_calls = [x for x in acp.prompt_calls if x["trace_tag"] == "intent_classify_prime"]
+    classify_calls = [x for x in acp.prompt_calls if x["trace_tag"] == "intent_classify"]
+    assert len(prime_calls) == 1, "intent 规则应只 prime 一次"
+    assert len(classify_calls) == 2, "每条消息都应执行一次分类"
 
 
 def test_classify_intent_empty_text_returns_none():

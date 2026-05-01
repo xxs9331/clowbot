@@ -9,6 +9,21 @@ from config import _log_reasoning
 from utils.log_sync import get_log_path
 from utils.section_reader import extract_section_text
 
+# 中文数字 → int（仅处理常见「一～十、两」；解析失败交给正则 \d+ 或默认 3）
+_CN_COUNT_ONE_DIGIT = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
 
 class LocalViewMixin:
     def _get_today_log_path(self) -> Path:
@@ -60,11 +75,72 @@ class LocalViewMixin:
             f"未完成待办：{n_todo_pending}"
         )
 
-    def _compose_local_view_body(self, kind: str, content: str) -> str:
+    @staticmethod
+    def _parse_recent_bullet_count(text: str) -> int:
+        """从用户话里抽「几条」数量，默认 3，上限 20。"""
+        raw = (text or "").strip()
+        m = re.search(r"(\d{1,2})\s*条", raw)
+        if m:
+            return max(1, min(20, int(m.group(1))))
+        m2 = re.search(r"([一二两三四五六七八九十]+)\s*条", raw)
+        if m2:
+            s = m2.group(1)
+            if len(s) == 1 and s in _CN_COUNT_ONE_DIGIT:
+                return max(1, min(20, _CN_COUNT_ONE_DIGIT[s]))
+        return 3
+
+    @staticmethod
+    def _wants_record_recent_snippet(raw: str) -> bool:
+        """是否查询「最近若干条记录/记忆」（读今日日记 📝 记录节，非写入）。"""
+        if not raw.strip():
+            return False
+        query_markers = (
+            "找",
+            "查",
+            "翻",
+            "列",
+            "给",
+            "搜",
+            "哪些",
+            "几条",
+            "多少",
+            "最近",
+            "最新",
+            "看下",
+            "看看",
+            "说一下",
+            "讲讲",
+            "回忆",
+            "回想",
+        )
+        if "记忆" in raw and any(m in raw for m in query_markers):
+            return True
+        if ("最近" in raw or "最新" in raw) and "条" in raw and (
+            "记录" in raw or "记忆" in raw
+        ):
+            return True
+        return False
+
+    def _compose_local_view_body(
+        self, kind: str, content: str, user_text: str = ""
+    ) -> str:
         if kind == "log":
             return content.strip() if content.strip() else "今日日志为空"
         if kind == "brief":
             return self._build_local_daily_brief(content)
+        if kind == "record_recent":
+            n = self._parse_recent_bullet_count(user_text)
+            body = extract_section_text(content, "📝", "记录", include_heading=False)
+            bullets: list[str] = []
+            for line in (body or "").splitlines():
+                s = line.strip()
+                if s.startswith("- "):
+                    bullets.append(s)
+            if not bullets:
+                return "今日「📝 记录」里还没有条目。"
+            tail = bullets[-n:]
+            head = f"今日记录（最近 {len(tail)} 条）："
+            return head + "\n" + "\n".join(tail)
         if kind == "record":
             section = self._extract_section(content, "📝", "记录")
             return section if section else "今日暂无记录内容"
@@ -87,6 +163,9 @@ class LocalViewMixin:
         ]
         if any(k in raw for k in brief_kws):
             return "brief"
+        # 「最近几条记忆/记录」：在 unified LLM 之前真实读盘，避免只回敷衍话术
+        if self._wants_record_recent_snippet(raw):
+            return "record_recent"
         log_kws = [
             "查看今日日志", "查看今天日志", "今日日志", "今天日志",
             "查看日志", "看日志", "看下日志", "看看日志", "打开日志",
@@ -116,13 +195,20 @@ class LocalViewMixin:
             return "todo"
         return ""
 
-    async def _send_local_today_view(self, kind: str, to_user: str, context_token: str = "") -> str:
+    async def _send_local_today_view(
+        self,
+        kind: str,
+        to_user: str,
+        context_token: str = "",
+        *,
+        user_text: str = "",
+    ) -> str:
         """本地读取今日日记。返回 ok（含正常空内容）或 error（文件不存在/读失败）。"""
         t0 = time.perf_counter()
         log_path = self._get_today_log_path()
         cache_key = (to_user, kind)
 
-        if kind not in ("log", "record", "remind", "todo", "brief"):
+        if kind not in ("log", "record", "record_recent", "remind", "todo", "brief"):
             self._log_local_view_obs(kind, "error", "bad_kind", t0, False)
             return "error"
 
@@ -136,7 +222,7 @@ class LocalViewMixin:
             self._log_local_view_obs(kind, "error", "read_exception", t0, False)
             return "error"
 
-        msg = self._compose_local_view_body(kind, content)
+        msg = self._compose_local_view_body(kind, content, user_text=user_text)
         if not msg:
             self._log_local_view_obs(kind, "error", "empty_compose", t0, False)
             return "error"
@@ -179,6 +265,7 @@ class LocalViewMixin:
             kind_hint = {
                 "log": "全文日志",
                 "record": "「记录」节",
+                "record_recent": "「记录」节末尾若干条",
                 "remind": "「提醒」节",
                 "todo": "「待办」节",
                 "brief": "今日简报（记录条数、未完成提醒/待办统计）",
@@ -208,6 +295,8 @@ class LocalViewMixin:
         context_token: str,
         user_text: str,
     ) -> None:
-        status = await self._send_local_today_view(kind, to_user, context_token)
+        status = await self._send_local_today_view(
+            kind, to_user, context_token, user_text=user_text
+        )
         if status == "error":
             await self._local_view_llm_fallback(kind, to_user, context_token, user_text)

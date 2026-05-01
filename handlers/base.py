@@ -134,6 +134,20 @@ class Handler(
         text = (text or "").strip()
         if not text:
             return {}
+        # 常见噪声：markdown 围栏、弯引号（会导致 strict JSON 与正则双双失效）
+        fence = re.search(
+            r"```(?:json)?\s*([\s\S]*?)\s*```",
+            text,
+            flags=re.I,
+        )
+        if fence:
+            text = fence.group(1).strip()
+        text = (
+            text.replace("\u201c", '"')
+            .replace("\u201d", '"')
+            .replace("\u2018", "'")
+            .replace("\u2019", "'")
+        )
         try:
             return json.loads(text)
         except Exception:
@@ -141,6 +155,7 @@ class Handler(
 
         # 容错：从每个 "{" 起尝试 raw_decode，拿到首个可解析对象。
         # 这样在回复前后夹杂说明文字或其它垃圾片段时，仍能尽量提取决策 JSON。
+        # 必须含 top-level "tool"（unified 信封），否则会误把 payload 里的 {} 当成整段 JSON。
         decoder = json.JSONDecoder()
         for m in re.finditer(r"\{", text):
             start = m.start()
@@ -148,7 +163,7 @@ class Handler(
                 obj, _end = decoder.raw_decode(text[start:])
             except Exception:
                 continue
-            if isinstance(obj, dict):
+            if isinstance(obj, dict) and "tool" in obj:
                 return obj
 
         # 最后兜底：修复常见的“近似 JSON 但 reply 未转义换行导致坏掉”的 unified 回复。
@@ -158,9 +173,27 @@ class Handler(
             text,
             flags=re.I | re.S,
         )
-        if not tool_m:
-            return {}
-        tool = (tool_m.group(1) or "").strip()
+        tool = (tool_m.group(1) or "").strip() if tool_m else ""
+        if not tool:
+            # 最后一层朴素提取，兼容正则没命中的脏文本
+            lo = text.lower()
+            key_idx = lo.find('"tool"')
+            if key_idx < 0:
+                key_idx = lo.find("'tool'")
+            if key_idx >= 0:
+                colon_idx = text.find(":", key_idx)
+                if colon_idx >= 0:
+                    q = ""
+                    q_idx = -1
+                    for cand in ('"', "'"):
+                        i = text.find(cand, colon_idx + 1)
+                        if i >= 0 and (q_idx < 0 or i < q_idx):
+                            q_idx = i
+                            q = cand
+                    if q_idx >= 0:
+                        end_idx = text.find(q, q_idx + 1)
+                        if end_idx > q_idx:
+                            tool = text[q_idx + 1:end_idx].strip()
         if not tool:
             return {}
 

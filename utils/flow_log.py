@@ -123,6 +123,21 @@ def log_acp_turn(
         f"  prompt_preview:\n{_snip(prompt or '', PREVIEW_PROMPT)}",
         f"  reply_preview:\n{_snip(reply or '', PREVIEW_REPLY)}",
     ]
+    # 链路可观测：用于区分“日志截断 / 上游截断 / 本地提前退出”
+    if m.get("break_reason") is not None:
+        lines.append(f"  collector_break_reason: {m.get('break_reason')}")
+    if m.get("saw_final_response") is not None:
+        lines.append(f"  collector_saw_final_response: {m.get('saw_final_response')}")
+    if m.get("saw_end_turn") is not None:
+        lines.append(f"  collector_saw_end_turn: {m.get('saw_end_turn')}")
+    if m.get("update_counters"):
+        try:
+            lines.append(
+                "  collector_update_counters: "
+                + json.dumps(m.get("update_counters"), ensure_ascii=False, default=str)
+            )
+        except Exception:
+            lines.append(f"  collector_update_counters: {str(m.get('update_counters'))[:500]}")
     if reasoning:
         lines.append(f"  reasoning_preview:\n{_snip(reasoning, PREVIEW_REASONING)}")
     else:

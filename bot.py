@@ -36,6 +36,7 @@ async def main():
         port=oc_cfg.get("port", 0),
         hostname=oc_cfg.get("hostname", "127.0.0.1"),
         model=oc_cfg.get("model", "deepseek/deepseek-v4-flash"),
+        max_tokens=int(oc_cfg.get("max_tokens", 500) or 500),
     )
     wx = ClawBotClient(config.get("bot", {}))
     archive_task = None

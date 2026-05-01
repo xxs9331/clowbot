@@ -7,6 +7,7 @@ opencode:
   cwd: "D:/Lenovo/Documents/世界树/世界树"
   port: 4096
   hostname: "127.0.0.1"
+  max_tokens: 500
   model: "opencode-go/deepseek-v4-flash"        # 默认文本模型
   multimodal_model: "opencode-go/qwen3.6-plus"  # 多模态（图片）模型
 
@@ -14,6 +15,7 @@ opencode:
   # intent_model: "alibaba-cn/qwen3.5-flash"
   # intent_threshold_high: 0.8
   # intent_threshold_mid: 0.5
+  structured_retry_count: 3
 
 # ─── Vault 路径 ───
 vault:

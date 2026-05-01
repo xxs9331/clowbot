@@ -67,6 +67,18 @@ class TodoCoachMixin:
         tasks = state.get("tasks", [])
         return tasks[idx:] if idx < len(tasks) else []
 
+    @staticmethod
+    def _has_next_prompt(reply: str) -> bool:
+        """回复里是否仍包含待办追问（去重/节流用）。"""
+        r = (reply or "").strip()
+        if not r:
+            return False
+        if "做完了吗" in r:
+            return True
+        if "下一组：" in r or "下一个：" in r:
+            return True
+        return False
+
     # ─── Vault 写入 prompt 便捷 ───
 
     def _write_todo_prompt(self, payload: dict, output_contract: str = OUTPUT_WRITE_CONFIRM) -> str:

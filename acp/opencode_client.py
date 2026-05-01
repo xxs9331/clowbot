@@ -32,12 +32,14 @@ class OpenCodeACP:
         port: int = 0,
         hostname: str = "127.0.0.1",
         model: str = DEFAULT_MODEL,
+        max_tokens: int = 500,
     ):
         self.cwd = cwd
         self.port = port
         self.hostname = hostname
         self.model = model
         self.multimodal_model = MULTIMODAL_MODEL
+        self.max_tokens = int(max_tokens) if max_tokens else 0
         self._proc: Optional[subprocess.Popen] = None
         self._msg_id = 0
         self._reader_thread: Optional[threading.Thread] = None
@@ -47,6 +49,15 @@ class OpenCodeACP:
         self._notification_handler: Optional[Callable] = None
         # 单通道 JSON-RPC：同一时刻仅允许一个 in-flight 请求消费队列，避免串包
         self._rpc_lock = asyncio.Lock()
+
+    def _build_prompt_params(self, session_id: str, prompt_parts: list[dict]) -> dict:
+        params = {
+            "sessionId": session_id,
+            "prompt": prompt_parts,
+        }
+        if self.max_tokens > 0:
+            params["maxTokens"] = self.max_tokens
+        return params
 
     # ─── 生命周期管理 ───
 
@@ -307,6 +318,73 @@ class OpenCodeACP:
 
         return ""
 
+    @staticmethod
+    def _extract_first_json_object(text: str) -> dict | None:
+        s = (text or "").strip()
+        if not s:
+            return None
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        dec = json.JSONDecoder()
+        for i, ch in enumerate(s):
+            if ch != "{":
+                continue
+            try:
+                obj, _ = dec.raw_decode(s[i:])
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                return obj
+        return None
+
+    @classmethod
+    def _validate_schema_obj(cls, obj: dict, schema: dict) -> bool:
+        if not isinstance(obj, dict) or not isinstance(schema, dict):
+            return False
+        if schema.get("type") and schema.get("type") != "object":
+            return False
+        props = schema.get("properties") or {}
+        required = schema.get("required") or []
+        for k in required:
+            if k not in obj:
+                return False
+        if schema.get("additionalProperties") is False:
+            for k in obj:
+                if k not in props:
+                    return False
+        for k, v in obj.items():
+            ps = props.get(k)
+            if not isinstance(ps, dict):
+                continue
+            t = ps.get("type")
+            if t == "string" and not isinstance(v, str):
+                return False
+            if t == "object" and not isinstance(v, dict):
+                return False
+            if t == "array" and not isinstance(v, list):
+                return False
+            if t == "number" and not isinstance(v, (int, float)):
+                return False
+            if t == "integer" and not isinstance(v, int):
+                return False
+            if t == "boolean" and not isinstance(v, bool):
+                return False
+            enum_vals = ps.get("enum")
+            if isinstance(enum_vals, list) and v not in enum_vals:
+                return False
+            if t == "object" and isinstance(v, dict):
+                child_required = ps.get("required")
+                child_props = ps.get("properties")
+                child_additional = ps.get("additionalProperties")
+                if child_required or child_props is not None or child_additional is False:
+                    if not cls._validate_schema_obj(v, ps):
+                        return False
+        return True
+
     # ─── 收集流式响应 ───
 
     async def _collect_prompt_response(
@@ -329,6 +407,10 @@ class OpenCodeACP:
         all_notifications = []
         all_raw = []  # 调试：记录所有原始消息
         final_result = {}
+        saw_end_turn = False
+        saw_final_response = False
+        break_reason = "deadline_timeout"
+        update_counters: dict[str, int] = {}
         deadline = time.time() + timeout
         last_activity = time.time()
 
@@ -337,8 +419,10 @@ class OpenCodeACP:
                 msg = await asyncio.wait_for(self._response_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 if self._proc and self._proc.poll() is not None:
+                    break_reason = "process_exited"
                     break
                 if time.time() - last_activity > 30:
+                    break_reason = "idle_timeout_30s"
                     break
                 continue
 
@@ -347,6 +431,8 @@ class OpenCodeACP:
             # 最终响应（匹配 msg_id）
             if msg.get("id") == msg_id:
                 final_result = msg
+                saw_final_response = True
+                break_reason = "matched_final_response"
                 break
 
             # 记录所有消息用于调试
@@ -367,6 +453,8 @@ class OpenCodeACP:
                         continue
                 update = params.get("update", {})
                 su = update.get("sessionUpdate", "")
+                if su:
+                    update_counters[su] = update_counters.get(su, 0) + 1
                 if su == "text_delta":
                     all_text.append(update.get("textDelta", ""))
                 elif su == "agent_message_chunk":
@@ -390,6 +478,8 @@ class OpenCodeACP:
                 elif su in ("tool_call_update", "tool_call"):
                     pass  # 工具调用（fs 操作等），不需要收集文本
                 elif su == "end_turn":
+                    saw_end_turn = True
+                    break_reason = "end_turn"
                     break
                 else:
                     if su:
@@ -413,6 +503,10 @@ class OpenCodeACP:
             "result": final_result,
             "notifications": all_notifications,
             "raw_count": len(all_raw),
+            "saw_end_turn": saw_end_turn,
+            "saw_final_response": saw_final_response,
+            "break_reason": break_reason,
+            "update_counters": update_counters,
         }
 
     # ─── 业务 API ───
@@ -470,10 +564,10 @@ class OpenCodeACP:
         async with self._rpc_lock:
             msg_id = self._send(
                 "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": message}],
-                },
+                self._build_prompt_params(
+                    session_id,
+                    [{"type": "text", "text": message}],
+                ),
             )
             collected = await self._collect_prompt_response(
                 msg_id, session_id=session_id, timeout=180
@@ -511,9 +605,50 @@ class OpenCodeACP:
             meta={
                 "raw_count": collected.get("raw_count"),
                 "notification_count": len(collected.get("notifications", [])),
+                "saw_end_turn": collected.get("saw_end_turn"),
+                "saw_final_response": collected.get("saw_final_response"),
+                "break_reason": collected.get("break_reason"),
+                "update_counters": collected.get("update_counters"),
             },
         )
         return reply, reasoning
+
+    async def prompt_structured(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        json_schema: dict,
+        retry_count: int = 3,
+        trace_tag: str = "prompt_structured",
+    ) -> dict | None:
+        """结构化输出：文本协议 + 本地 schema 校验 + retry。
+
+        不依赖 provider 原生 function calling，兼容 openai-compatible 网关。
+        """
+        schema_text = json.dumps(json_schema, ensure_ascii=False)
+        structured_prompt = (
+            f"{message}\n\n"
+            "你必须只返回一个 JSON 对象，且严格满足下面的 JSON Schema。\n"
+            "禁止输出解释、markdown、代码块。\n"
+            f"JSON Schema: {schema_text}\n"
+            "仅输出 JSON："
+        )
+        attempts = max(1, int(retry_count or 1))
+        for i in range(attempts):
+            reply, reasoning = await self.prompt(
+                session_id,
+                structured_prompt,
+                trace_tag=f"{trace_tag}#{i + 1}",
+            )
+            obj = self._extract_first_json_object(reply or "")
+            if isinstance(obj, dict) and self._validate_schema_obj(obj, json_schema):
+                return obj
+            # 兜底：部分模型把 JSON 放在 reasoning 通道
+            obj2 = self._extract_first_json_object(reasoning or "")
+            if isinstance(obj2, dict) and self._validate_schema_obj(obj2, json_schema):
+                return obj2
+        return None
 
     async def prompt_with_image(
         self,
@@ -544,10 +679,7 @@ class OpenCodeACP:
         async with self._rpc_lock:
             msg_id = self._send(
                 "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": prompt_parts,
-                },
+                self._build_prompt_params(session_id, prompt_parts),
             )
             collected = await self._collect_prompt_response(
                 msg_id, session_id=session_id, timeout=180
@@ -569,6 +701,10 @@ class OpenCodeACP:
             meta={
                 "raw_count": collected.get("raw_count"),
                 "notification_count": len(collected.get("notifications", [])),
+                "saw_end_turn": collected.get("saw_end_turn"),
+                "saw_final_response": collected.get("saw_final_response"),
+                "break_reason": collected.get("break_reason"),
+                "update_counters": collected.get("update_counters"),
             },
         )
         return reply, reasoning
