@@ -11,6 +11,9 @@ INTENT_REMIND = "remind"        # 设置提醒
 INTENT_TODO = "todo"            # 添加待办
 INTENT_QUERY_TODO = "query_todo"    # 查看待办
 INTENT_QUERY_REMIND = "query_remind"  # 查看提醒
+INTENT_TODO_DONE = "todo_done"      # 当前待办完成
+INTENT_TODO_NOT_DONE = "todo_not_done"  # 当前待办未完成
+INTENT_TODO_NEXT = "todo_next"      # 询问当前应做哪个待办
 INTENT_NONE = "none"
 
 
@@ -40,6 +43,22 @@ def detect_intent(text: str) -> tuple[str, str]:
     for kw in query_remind_kws:
         if kw in text:
             return INTENT_QUERY_REMIND, ""
+
+    # ─── 待办推进类意图 ───
+    todo_next_kws = ["先做哪个", "现在做哪个", "我先做什么", "接下来做什么", "下一个做什么"]
+    for kw in todo_next_kws:
+        if kw in text:
+            return INTENT_TODO_NEXT, ""
+
+    todo_done_kws = ["做完了", "做完", "搞定了", "好了", "完成了", "ok了", "可以了"]
+    for kw in todo_done_kws:
+        if kw in text:
+            return INTENT_TODO_DONE, ""
+
+    todo_not_done_kws = ["还没做", "没做完", "没做", "等会再做", "稍后再做", "先不做"]
+    for kw in todo_not_done_kws:
+        if kw in text:
+            return INTENT_TODO_NOT_DONE, ""
 
     # ─── 提醒意图 ───
     # "提醒我7:30上班" / "7:30提醒我上班" / "今晚9点提醒我" / "叫我明天8点起床"

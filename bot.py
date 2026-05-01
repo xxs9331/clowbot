@@ -20,6 +20,8 @@ import heapq
 import json
 import os
 import random
+import re
+import time
 import uuid
 import base64
 import sys
@@ -32,7 +34,11 @@ import yaml
 
 from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.time_utils import now, time_str
-from utils.intent import detect_intent, INTENT_REMIND, INTENT_TODO, INTENT_NONE, INTENT_QUERY_TODO, INTENT_QUERY_REMIND
+from utils.intent import (
+    detect_intent,
+    INTENT_REMIND,
+    INTENT_QUERY_REMIND,
+)
 from utils.log_sync import get_log_path, parse_reminders_from_log, mark_reminder_done
 
 # ─── 日志目录 ───
@@ -512,6 +518,11 @@ class Handler:
         self.session_id = ""
         self._reminded_ids = set()  # 已触发的提醒（避免重复推送）
         self._reminder_refresh = asyncio.Event()
+        self._todo_queues = {}  # 用户维度短期待办队列：{"user": {"tasks": [...], "idx": 0}}
+        self._pending_reorders = {}  # 用户维度重排确认缓存：{"user": ["任务A", "任务B"]}
+        # 本地查看防抖：(user_id, kind) -> (monotonic_ts, last_message)
+        self._local_view_last = {}
+        self._local_view_debounce_sec = 2.0
 
     async def init_session(self):
         """初始化 ACP session 并设置模型"""
@@ -521,6 +532,473 @@ class Handler:
     def notify_reminder_refresh(self):
         """提醒列表发生变化时，唤醒调度器重建索引"""
         self._reminder_refresh.set()
+
+    @staticmethod
+    def _split_todo_items(text: str) -> list[str]:
+        """把一句话拆成多个待办项，适配微信口语分隔"""
+        cleaned = text.strip().strip("。.!！")
+        cleaned = cleaned.replace("然后", "，").replace("再", "，")
+        parts = re.split(r"[,，、;；\n]+", cleaned)
+        items = []
+        for part in parts:
+            item = re.sub(r"^[-\d\.\)\(、\s]+", "", part).strip()
+            item = item.strip("：: ")
+            if item:
+                items.append(item)
+        return items
+
+    def _set_todo_queue(self, user_id: str, tasks: list[str]):
+        self._todo_queues[user_id] = {"tasks": tasks, "idx": 0}
+
+    def _get_current_queue_task(self, user_id: str) -> str:
+        state = self._todo_queues.get(user_id)
+        if not state:
+            return ""
+        idx = state.get("idx", 0)
+        tasks = state.get("tasks", [])
+        if idx >= len(tasks):
+            return ""
+        return tasks[idx]
+
+    def _advance_queue_task(self, user_id: str) -> str:
+        state = self._todo_queues.get(user_id)
+        if not state:
+            return ""
+        state["idx"] = state.get("idx", 0) + 1
+        next_task = self._get_current_queue_task(user_id)
+        if not next_task:
+            self._todo_queues.pop(user_id, None)
+        return next_task
+
+    def _get_remaining_queue_tasks(self, user_id: str) -> list[str]:
+        state = self._todo_queues.get(user_id)
+        if not state:
+            return []
+        idx = state.get("idx", 0)
+        tasks = state.get("tasks", [])
+        return tasks[idx:] if idx < len(tasks) else []
+
+    def _get_today_log_path(self) -> Path:
+        vault = self.cfg["vault"]
+        return get_log_path(vault["root"], vault["daily_log_dir"])
+
+    @staticmethod
+    def _extract_section(content: str, emoji: str, title: str) -> str:
+        pattern = rf"(##\s*(?:\d+(?:\.\d+)?\s+)?{re.escape(emoji)}\s*{re.escape(title)}.*?)(?=##|\Z)"
+        match = re.search(pattern, content, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def _log_local_view_obs(
+        self,
+        kind: str,
+        status: str,
+        detail: str,
+        t0: float,
+        cache_hit: bool,
+    ) -> None:
+        ms = (time.perf_counter() - t0) * 1000
+        print(
+            f"[Bot] local_view kind={kind} status={status} detail={detail} "
+            f"ms={ms:.1f} cache_hit={cache_hit}"
+        )
+
+    @staticmethod
+    def _count_section_bullet_lines(section: str) -> int:
+        if not section:
+            return 0
+        return sum(1 for line in section.splitlines() if line.strip().startswith("- "))
+
+    @staticmethod
+    def _count_pending_checkboxes(section: str) -> int:
+        if not section:
+            return 0
+        return len(re.findall(r"^- \[ \]", section, re.MULTILINE))
+
+    def _build_local_daily_brief(self, content: str) -> str:
+        rec_sec = self._extract_section(content, "📝", "记录")
+        rem_sec = self._extract_section(content, "⏰", "提醒")
+        todo_sec = self._extract_section(content, "📋", "待办")
+        n_record = self._count_section_bullet_lines(rec_sec)
+        n_remind_pending = self._count_pending_checkboxes(rem_sec)
+        n_todo_pending = self._count_pending_checkboxes(todo_sec)
+        return (
+            "今日简报\n"
+            f"记录条目数：{n_record}\n"
+            f"未完成提醒：{n_remind_pending}\n"
+            f"未完成待办：{n_todo_pending}"
+        )
+
+    def _compose_local_view_body(self, kind: str, content: str) -> str:
+        if kind == "log":
+            return content.strip() if content.strip() else "今日日志为空"
+        if kind == "brief":
+            return self._build_local_daily_brief(content)
+        if kind == "record":
+            section = self._extract_section(content, "📝", "记录")
+            return section if section else "今日暂无记录内容"
+        if kind == "remind":
+            section = self._extract_section(content, "⏰", "提醒")
+            return section if section else "今日暂无提醒内容"
+        if kind == "todo":
+            section = self._extract_section(content, "📋", "待办")
+            return section if section else "今日暂无待办内容"
+        return ""
+
+    def _detect_local_view_kind(self, text: str) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        # 简报优先（避免与「日志」子串误触）
+        brief_kws = [
+            "查看简报", "今日简报", "今天简报", "看下简报", "看看简报",
+            "日志简报", "今日概况", "今天概况",
+        ]
+        if any(k in raw for k in brief_kws):
+            return "brief"
+        log_kws = [
+            "查看今日日志", "查看今天日志", "今日日志", "今天日志",
+            "查看日志", "看日志", "看下日志", "看看日志", "打开日志",
+            "给我日志", "日志全文", "今日日志内容", "今天日志内容",
+            "今日日记", "今天日记", "看下日记",
+        ]
+        if any(k in raw for k in log_kws):
+            return "log"
+        record_kws = [
+            "查看记录", "看记录", "看下记录", "看看记录",
+            "今日记录", "今天记录", "记录列表",
+        ]
+        if any(k in raw for k in record_kws):
+            return "record"
+        remind_kws = [
+            "查看提醒", "看提醒", "看下提醒", "看看提醒",
+            "提醒列表", "今日提醒", "今天提醒", "有什么提醒",
+        ]
+        if any(k in raw for k in remind_kws):
+            return "remind"
+        todo_kws = [
+            "查看待办", "看待办", "看下待办", "看看待办",
+            "待办列表", "待办清单", "今日待办", "今天待办",
+            "有什么待办", "待办呢",
+        ]
+        if any(k in raw for k in todo_kws):
+            return "todo"
+        return ""
+
+    async def _send_local_today_view(self, kind: str, to_user: str, context_token: str = "") -> str:
+        """本地读取今日日记。返回 ok（含正常空内容）或 error（文件不存在/读失败）。"""
+        t0 = time.perf_counter()
+        log_path = self._get_today_log_path()
+        cache_key = (to_user, kind)
+
+        if kind not in ("log", "record", "remind", "todo", "brief"):
+            self._log_local_view_obs(kind, "error", "bad_kind", t0, False)
+            return "error"
+
+        try:
+            if not log_path.exists():
+                self._log_local_view_obs(kind, "error", "missing_file", t0, False)
+                return "error"
+            content = log_path.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"[Bot] local_view read error: {e}")
+            self._log_local_view_obs(kind, "error", "read_exception", t0, False)
+            return "error"
+
+        msg = self._compose_local_view_body(kind, content)
+        if not msg:
+            self._log_local_view_obs(kind, "error", "empty_compose", t0, False)
+            return "error"
+
+        now_m = time.monotonic()
+        prev = self._local_view_last.get(cache_key)
+        if prev is not None:
+            ts, prev_msg = prev
+            if (
+                now_m - ts < self._local_view_debounce_sec
+                and prev_msg == msg
+            ):
+                await self.wx.send_text(prev_msg, to_user, context_token)
+                self._log_local_view_obs(kind, "ok", "debounce_resend", t0, True)
+                return "ok"
+
+        await self.wx.send_text(msg, to_user, context_token)
+        self._local_view_last[cache_key] = (now_m, msg)
+        self._log_local_view_obs(kind, "ok", "sent", t0, False)
+        return "ok"
+
+    async def _local_view_llm_fallback(
+        self,
+        kind: str,
+        from_user: str,
+        context_token: str,
+        user_text: str,
+    ) -> None:
+        """仅当本地读取异常时调用大模型尝试读文件或说明原因。"""
+        await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+        try:
+            vault = self.cfg["vault"]
+            log_path = self._get_today_log_path()
+            system_prefix = build_system_prompt(
+                vault_root=vault["root"],
+                daily_log_dir=vault["daily_log_dir"],
+                project_dir=vault.get("project_dir", ""),
+                task_dir=vault.get("task_dir", ""),
+            )
+            kind_hint = {
+                "log": "全文日志",
+                "record": "「记录」节",
+                "remind": "「提醒」节",
+                "todo": "「待办」节",
+                "brief": "今日简报（记录条数、未完成提醒/待办统计）",
+            }.get(kind, kind)
+            prompt = (
+                f"{system_prefix}\n"
+                f"用户想查看今日日记的本地内容，但程序读取文件失败（类型：{kind_hint}）。\n"
+                f"文件路径：{log_path}\n"
+                f"用户原话：「{user_text}」\n"
+                "请用工具读取该文件（若存在）并给出用户需要的内容；若无法读取则说明原因。"
+            )
+            reply, reasoning = await self.acp.prompt(self.session_id, prompt)
+            if reasoning:
+                print(f"[Bot] 🧠 {reasoning[:200]}")
+                _log_reasoning(f"[local_view_fallback:{kind}] {user_text[:80]}", reasoning)
+            reply = (reply or "").strip()[: self.cfg["bot"].get("max_reply_length", 2000)]
+            await self.wx.send_text(reply or "本地读取失败，请稍后重试。", from_user, context_token)
+        finally:
+            await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
+
+    async def _local_view_with_optional_llm_fallback(
+        self,
+        kind: str,
+        to_user: str,
+        context_token: str,
+        user_text: str,
+    ) -> None:
+        status = await self._send_local_today_view(kind, to_user, context_token)
+        if status == "error":
+            await self._local_view_llm_fallback(kind, to_user, context_token, user_text)
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict:
+        """从模型回复中提取 JSON 对象"""
+        text = (text or "").strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return {}
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return {}
+
+    async def _llm_todo_decide(self, user_id: str, text: str) -> dict:
+        """让大模型统筹待办动作，返回结构化决策"""
+        current_task = self._get_current_queue_task(user_id)
+        remaining = self._get_remaining_queue_tasks(user_id)
+        pending_reorder = self._pending_reorders.get(user_id, [])
+        prompt = (
+            "你是微信待办统筹助手。请根据用户消息和当前待办状态，输出 JSON 决策，不要输出其他内容。\n"
+            "动作 action 仅允许：add_batch|done_current|not_done|next|reorder|reorder_confirm|none\n"
+            "字段：\n"
+            '- action: 字符串\n'
+            '- tasks: 字符串数组（仅 add_batch 用）\n'
+            '- reorder: 字符串数组（仅 reorder 用，必须是 remaining_tasks 的重排）\n'
+            '- reply: 给用户的微信短句（1句）\n'
+            f"- current_task: {current_task or 'null'}\n"
+            f"- remaining_tasks: {json.dumps(remaining, ensure_ascii=False)}\n"
+            f"- pending_reorder: {json.dumps(pending_reorder, ensure_ascii=False)}\n"
+            f"- user_message: {text}\n"
+            "规则：\n"
+            "1) 能理解为完成当前任务时，用 done_current。\n"
+            "2) 用户问先做哪个，用 next。\n"
+            "3) 用户一次说多个事项，用 add_batch，并给具体任务名。\n"
+            "4) 用户在讨论顺序时，用 reorder，并给建议顺序。\n"
+            "5) 仅当用户明确确认（如“按这个来/就这个顺序/确认”）且存在pending_reorder时，用 reorder_confirm。\n"
+            "6) 不确定时返回 none，并给简短reply。\n"
+        )
+        reply, _ = await self.acp.prompt(self.session_id, prompt)
+        decision = self._extract_json_object(reply)
+        if not isinstance(decision, dict):
+            return {"action": "none", "reply": ""}
+        return decision
+
+    async def _llm_unified_decide(self, user_id: str, text: str) -> dict:
+        """统一决策：待办统筹 or 生活日志记录"""
+        current_task = self._get_current_queue_task(user_id)
+        remaining = self._get_remaining_queue_tasks(user_id)
+        pending_reorder = self._pending_reorders.get(user_id, [])
+        prompt = (
+            "你是微信个人助手。请根据用户消息输出 JSON 决策，不要输出其他内容。\n"
+            "字段：\n"
+            '- action: "todo" | "life" | "none"\n'
+            '- sub: 子动作（仅 action=todo 时）: add_batch|done_current|not_done|next|reorder|reorder_confirm\n'
+            '- tasks: 字符串数组（add_batch 用）\n'
+            '- reorder: 字符串数组（reorder 用）\n'
+            '- reply: 给用户的微信短句\n'
+            f"- current_task: {current_task or 'null'}\n"
+            f"- remaining_tasks: {json.dumps(remaining, ensure_ascii=False)}\n"
+            f"- pending_reorder: {json.dumps(pending_reorder, ensure_ascii=False)}\n"
+            f"- user_message: {text}\n"
+            "规则：\n"
+            "1) 涉及待办推进/完成/重排/查看队列 → action=todo。\n"
+            "2) 生活记录（体重/饮食/睡眠/快递/出行）→ action=life。\n"
+            "3) 不确定 → action=none。\n"
+            "4) 有活跃待办队列时，优先走 todo。\n"
+        )
+        reply, _ = await self.acp.prompt(self.session_id, prompt)
+        decision = self._extract_json_object(reply)
+        if not isinstance(decision, dict):
+            return {"action": "none", "reply": ""}
+        return decision
+
+    async def _apply_llm_todo_decision(self, decision: dict, from_user: str, context_token: str) -> bool:
+        """执行模型决策。返回是否已处理该消息。"""
+        action = str(decision.get("action", "none") or "none").strip().lower()
+        if action == "none":
+            return False
+
+        reply = str(decision.get("reply", "")).strip()
+        if action == "add_batch":
+            tasks = [str(t).strip() for t in (decision.get("tasks") or []) if str(t).strip()]
+            if not tasks:
+                return False
+            await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+            try:
+                vault = self.cfg["vault"]
+                system_prefix = build_system_prompt(
+                    vault_root=vault["root"],
+                    daily_log_dir=vault["daily_log_dir"],
+                )
+                append_lines = "\n".join([f"- [ ] {item}" for item in tasks])
+                prompt = (
+                    f"{system_prefix}\n"
+                    f"用户要添加待办，条目如下：\n{append_lines}\n"
+                    f"请在日志的「## 📋 待办」节按顺序追加这些行：\n{append_lines}\n"
+                    f"如果该节不存在则创建。只回复确认信息。"
+                )
+                await self.acp.prompt(self.session_id, prompt)
+            finally:
+                await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
+            self._set_todo_queue(from_user, tasks)
+            self._pending_reorders.pop(from_user, None)
+            first_task = self._get_current_queue_task(from_user)
+            ack = reply or f"记下了，这{len(tasks)}个我按顺序陪你做。"
+            if first_task:
+                ack = f"{ack}\n先做：{first_task}，做完了吗？"
+            await self.wx.send_text(ack, from_user, context_token)
+            return True
+
+        if action == "done_current":
+            current_task = self._get_current_queue_task(from_user)
+            if not current_task:
+                await self.wx.send_text(reply or "你现在没有进行中的待办。", from_user, context_token)
+                return True
+            self._pending_reorders.pop(from_user, None)
+            await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+            try:
+                vault = self.cfg["vault"]
+                system_prefix = build_system_prompt(
+                    vault_root=vault["root"],
+                    daily_log_dir=vault["daily_log_dir"],
+                )
+                prompt = (
+                    f"{system_prefix}\n"
+                    f"用户完成了待办：「{current_task}」\n"
+                    f"请在日志的「## 📋 待办」节中找到对应条目，将 - [ ] 改为 - [x]，并追加 ✅HH:MM。\n"
+                    f"只回复一句确认。"
+                )
+                await self.acp.prompt(self.session_id, prompt)
+            finally:
+                await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
+            next_task = self._advance_queue_task(from_user)
+            done_reply = reply or f"做得好，{current_task}已完成。"
+            if next_task:
+                done_reply = f"{done_reply}\n下一个：{next_task}，做完了吗？"
+            await self.wx.send_text(done_reply, from_user, context_token)
+            return True
+
+        if action == "not_done":
+            current_task = self._get_current_queue_task(from_user)
+            fallback = f"先做1分钟版本：{current_task}，做好再回我“好了”。" if current_task else "没问题，你先发几个待办我来排。"
+            await self.wx.send_text(reply or fallback, from_user, context_token)
+            return True
+
+        if action == "next":
+            current_task = self._get_current_queue_task(from_user)
+            fallback = f"你现在先做：{current_task}" if current_task else "当前没有进行中的短待办。"
+            await self.wx.send_text(reply or fallback, from_user, context_token)
+            return True
+
+        if action == "reorder":
+            order = [str(t).strip() for t in (decision.get("reorder") or []) if str(t).strip()]
+            remaining = self._get_remaining_queue_tasks(from_user)
+            if not remaining or sorted(order) != sorted(remaining):
+                await self.wx.send_text("顺序建议我收到了，但还不能安全改队列，请你再确认一次。", from_user, context_token)
+                return True
+            self._pending_reorders[from_user] = order
+            ask = reply or f"我建议顺序：{' → '.join(order)}。按这个顺序更新吗？"
+            await self.wx.send_text(ask, from_user, context_token)
+            return True
+
+        if action == "reorder_confirm":
+            order = self._pending_reorders.get(from_user, [])
+            if not order:
+                await self.wx.send_text(reply or "当前没有待确认的重排建议。", from_user, context_token)
+                return True
+            self._set_todo_queue(from_user, order)
+            self._pending_reorders.pop(from_user, None)
+            current_task = self._get_current_queue_task(from_user)
+            confirm_reply = reply or "已按确认顺序更新。"
+            if current_task:
+                confirm_reply = f"{confirm_reply}\n先做：{current_task}，做完了吗？"
+            await self.wx.send_text(confirm_reply, from_user, context_token)
+            return True
+
+        return False
+
+    async def _apply_unified_decision(
+        self,
+        decision: dict,
+        from_user: str,
+        context_token: str,
+        user_text: str = "",
+    ) -> bool:
+        """执行统一决策：todo 复用现有执行器，life 直接写入生活日志。"""
+        action = str(decision.get("action", "none") or "none").strip().lower()
+
+        if action == "todo":
+            todo_decision = {
+                "action": decision.get("sub", "none"),
+                "tasks": decision.get("tasks"),
+                "reorder": decision.get("reorder"),
+                "reply": decision.get("reply", ""),
+            }
+            return await self._apply_llm_todo_decision(todo_decision, from_user, context_token)
+
+        if action == "life":
+            vault = self.cfg["vault"]
+            system_prefix = build_system_prompt(
+                vault_root=vault["root"],
+                daily_log_dir=vault["daily_log_dir"],
+                project_dir=vault.get("project_dir", ""),
+                task_dir=vault.get("task_dir", ""),
+            )
+            reply, reasoning = await self.acp.prompt(
+                self.session_id, f"{system_prefix}\n用户发来：「{user_text}」"
+            )
+            if reasoning:
+                print(f"[Bot] 🧠 {reasoning[:200]}")
+                _log_reasoning(user_text, reasoning)
+            reply = (reply or "").strip()[: self.cfg["bot"].get("max_reply_length", 2000)]
+            await self.wx.send_text(reply or "已记录", from_user, context_token)
+            return True
+
+        return False
 
     async def handle(self, msg: dict):
         text = msg.get("text", "").strip()
@@ -604,131 +1082,80 @@ class Handler:
 
         if text.startswith("/"):
             await self._cmd(text, from_user, context_token)
-        else:
-            # ─── 自然语言意图检测 ───
+            return
+
+        # 高频查询优先本地读取；异常时再走大模型兜底
+        local_kind = self._detect_local_view_kind(text)
+        if local_kind:
+            await self._local_view_with_optional_llm_fallback(
+                local_kind, from_user, context_token, text
+            )
+            return
+
+        print(f"[Bot] <<< {text[:50]}")
+        await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+        try:
+            # 第一层：LLM 统一决策
+            decision = await self._llm_unified_decide(from_user, text)
+            handled = await self._apply_unified_decision(
+                decision,
+                from_user,
+                context_token,
+                user_text=text,
+            )
+            if handled:
+                return
+
+            # 提醒兜底：保留 intent 的时间解析能力
             intent, data = detect_intent(text)
             if intent == INTENT_REMIND:
-                # 让 AI 写入日志的 ⏰ 提醒 节
-                await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
-                try:
-                    vault = self.cfg["vault"]
-                    system_prefix = build_system_prompt(
-                        vault_root=vault["root"],
-                        daily_log_dir=vault["daily_log_dir"],
-                    )
-                    prompt = (
-                        f"{system_prefix}\n"
-                        f"用户要设置提醒：「{data}」\n"
-                        f"请在日志的「## ⏰ 提醒」节追加一行：\n"
-                        f"- [ ] {data}\n"
-                        f"如果该节不存在则创建。只回复确认信息。"
-                    )
-                    reply, _ = await self.acp.prompt(self.session_id, prompt)
-                    reply = (reply or "").strip()[:2000]
-                    await self.wx.send_text(reply or f"⏰ 已记录提醒：{data}", from_user, context_token)
-                    print(f"[Bot] ⏰ 提醒: {data}")
-                    self.notify_reminder_refresh()
-                except Exception as e:
-                    print(f"[Bot] 提醒写入错误: {e}")
-                    await self.wx.send_text(f"⏰ 已记录提醒：{data}（写入可能失败，请检查）", from_user, context_token)
-                finally:
-                    await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
-                return
-            elif intent == INTENT_TODO:
-                # 让 AI 写入日志的 📋 待办 节
-                await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
-                try:
-                    vault = self.cfg["vault"]
-                    system_prefix = build_system_prompt(
-                        vault_root=vault["root"],
-                        daily_log_dir=vault["daily_log_dir"],
-                    )
-                    prompt = (
-                        f"{system_prefix}\n"
-                        f"用户要添加待办：「{data}」\n"
-                        f"请在日志的「## 📋 待办」节追加一行：\n"
-                        f"- [ ] {data}\n"
-                        f"如果该节不存在则创建。只回复确认信息。"
-                    )
-                    reply, _ = await self.acp.prompt(self.session_id, prompt)
-                    reply = (reply or "").strip()[:2000]
-                    await self.wx.send_text(reply or f"✅ 已添加待办：{data}", from_user, context_token)
-                    print(f"[Bot] 📋 待办: {data}")
-                except Exception as e:
-                    print(f"[Bot] 待办写入错误: {e}")
-                    await self.wx.send_text(f"✅ 已添加待办：{data}（写入可能失败，请检查）", from_user, context_token)
-                finally:
-                    await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
-                return
-            elif intent == INTENT_QUERY_TODO:
-                # 直接读日志文件返回
-                vault = self.cfg["vault"]
-                log_path = get_log_path(vault["root"], vault["daily_log_dir"])
-                content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-                # 提取 📋 待办 节
-                import re
-                match = re.search(
-                    r"(##\s*(?:\d+(?:\.\d+)?\s+)?📋\s*待办.*?)(?=##|\Z)",
-                    content,
-                    re.DOTALL,
-                )
-                if match:
-                    await self.wx.send_text(match.group(1).strip(), from_user, context_token)
-                else:
-                    await self.wx.send_text("📭 暂无待办", from_user, context_token)
-                return
-            elif intent == INTENT_QUERY_REMIND:
-                # 直接读日志文件返回
-                vault = self.cfg["vault"]
-                log_path = get_log_path(vault["root"], vault["daily_log_dir"])
-                content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-                import re
-                match = re.search(
-                    r"(##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒.*?)(?=##|\Z)",
-                    content,
-                    re.DOTALL,
-                )
-                if match:
-                    await self.wx.send_text(match.group(1).strip(), from_user, context_token)
-                else:
-                    await self.wx.send_text("📭 暂无提醒", from_user, context_token)
-                return
-            print(f"[Bot] <<< {text[:50]}")
-            await self.wx.set_typing(
-                to_user=from_user, status=1, context_token=context_token
-            )
-
-            try:
-                # 使用 build_system_prompt 构造含路径和日期规则的系统提示词
                 vault = self.cfg["vault"]
                 system_prefix = build_system_prompt(
                     vault_root=vault["root"],
                     daily_log_dir=vault["daily_log_dir"],
-                    project_dir=vault.get("project_dir", ""),
-                    task_dir=vault.get("task_dir", ""),
                 )
-                reply, reasoning = await self.acp.prompt(
-                    self.session_id, f"{system_prefix}\n用户发来：「{text}」"
+                prompt = (
+                    f"{system_prefix}\n"
+                    f"用户要设置提醒：「{data}」\n"
+                    f"请在日志的「## ⏰ 提醒」节追加一行：\n"
+                    f"- [ ] {data}\n"
+                    f"如果该节不存在则创建。只回复确认信息。"
                 )
-                # 推理过程写入日志文件，终端显示摘要，不发给微信
-                if reasoning:
-                    print(f"[Bot] 🧠 {reasoning[:200]}")
-                    _log_reasoning(text, reasoning)
-                reply = (reply or "").strip()[
-                    : self.cfg["bot"].get("max_reply_length", 2000)
-                ]
-                await self.wx.send_text(reply or "OK", from_user, context_token)
-                print(f"[Bot] >>> {(reply or 'OK')[:80]}")
-            except Exception as e:
-                print(f"[Bot] error: {e}")
-                if self.cfg["bot"].get("reply_on_error", True):
-                    await self.wx.send_text(
-                        f"处理出错: {str(e)[:100]}", from_user, context_token
-                    )
-            finally:
-                await self.wx.set_typing(
-                    to_user=from_user, status=2, context_token=context_token
+                reply, _ = await self.acp.prompt(self.session_id, prompt)
+                reply = (reply or "").strip()[:2000]
+                await self.wx.send_text(reply or f"⏰ 已记录提醒：{data}", from_user, context_token)
+                print(f"[Bot] ⏰ 提醒: {data}")
+                self.notify_reminder_refresh()
+                return
+            if intent == INTENT_QUERY_REMIND:
+                await self._local_view_with_optional_llm_fallback(
+                    "remind", from_user, context_token, text
                 )
+                return
+
+            # 最终兜底：通用 LLM
+            vault = self.cfg["vault"]
+            system_prefix = build_system_prompt(
+                vault_root=vault["root"],
+                daily_log_dir=vault["daily_log_dir"],
+                project_dir=vault.get("project_dir", ""),
+                task_dir=vault.get("task_dir", ""),
+            )
+            reply, reasoning = await self.acp.prompt(
+                self.session_id, f"{system_prefix}\n用户发来：「{text}」"
+            )
+            if reasoning:
+                print(f"[Bot] 🧠 {reasoning[:200]}")
+                _log_reasoning(text, reasoning)
+            reply = (reply or "").strip()[: self.cfg["bot"].get("max_reply_length", 2000)]
+            await self.wx.send_text(reply or "收到", from_user, context_token)
+            print(f"[Bot] >>> {(reply or '收到')[:80]}")
+        except Exception as e:
+            print(f"[Bot] error: {e}")
+            if self.cfg["bot"].get("reply_on_error", True):
+                await self.wx.send_text(f"处理出错: {str(e)[:100]}", from_user, context_token)
+        finally:
+            await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
 
     async def _cmd(self, text: str, to: str, context_token: str = ""):
         cmd = text.lower().split()[0]
@@ -742,10 +1169,15 @@ class Handler:
                 "命令：\n"
                 "/remind 7:30 上班        → 设置提醒\n"
                 "/remind list             → 查看提醒\n"
-                "/todo add 买菜           → 添加待办\n"
-                "/todo done 1             → 完成待办\n"
+                "/todo 买菜、吃药、换衣服   → 批量添加待办\n"
+                "/todo done 吃药          → 完成待办\n"
+                "/todo next               → 现在先做哪个\n"
                 "/todo list               → 查看待办\n"
-                "/today  - 查看今日记录\n"
+                "/today  - 查看今日日志（本地优先）\n"
+                "/record - 查看今日记录节\n"
+                "/brief - 今日简报（本地统计）\n"
+                "/remind list - 查看提醒节\n"
+                "/todo list - 查看待办节\n"
                 "/stat <分类> - 7日趋势\n"
                 "/status - 系统状态\n"
                 "/help   - 帮助",
@@ -753,34 +1185,23 @@ class Handler:
                 context_token,
             )
         elif cmd in ["/remind", "/提醒"]:
-            # /remind 命令 → 直接走 AI 写入日志
-            await self.wx.set_typing(to_user=to, status=1, context_token=context_token)
-            try:
-                vault = self.cfg["vault"]
-                system_prefix = build_system_prompt(
-                    vault_root=vault["root"],
-                    daily_log_dir=vault["daily_log_dir"],
+            arg = text.strip()
+            for prefix in ["/remind", "/提醒"]:
+                if arg.lower().startswith(prefix):
+                    arg = arg[len(prefix):].strip()
+                    break
+            if arg.lower() in ["list", "列表", "ls", ""]:
+                await self._local_view_with_optional_llm_fallback(
+                    "remind", to, context_token, text
                 )
-                arg = text.strip()
-                for prefix in ["/remind", "/提醒"]:
-                    if arg.lower().startswith(prefix):
-                        arg = arg[len(prefix):].strip()
-                        break
-                if arg.lower() in ["list", "列表", "ls", ""]:
-                    # 查看提醒列表
-                    log_path = get_log_path(vault["root"], vault["daily_log_dir"])
-                    content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-                    import re
-                    match = re.search(
-                        r"(##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒.*?)(?=##|\Z)",
-                        content,
-                        re.DOTALL,
+            else:
+                await self.wx.set_typing(to_user=to, status=1, context_token=context_token)
+                try:
+                    vault = self.cfg["vault"]
+                    system_prefix = build_system_prompt(
+                        vault_root=vault["root"],
+                        daily_log_dir=vault["daily_log_dir"],
                     )
-                    if match:
-                        await self.wx.send_text(match.group(1).strip(), to, context_token)
-                    else:
-                        await self.wx.send_text("📭 暂无提醒", to, context_token)
-                else:
                     prompt = (
                         f"{system_prefix}\n"
                         f"用户要设置提醒：「{arg}」\n"
@@ -789,60 +1210,43 @@ class Handler:
                     reply, _ = await self.acp.prompt(self.session_id, prompt)
                     await self.wx.send_text((reply or "").strip() or f"⏰ 已记录提醒：{arg}", to, context_token)
                     self.notify_reminder_refresh()
-            except Exception as e:
-                await self.wx.send_text(f"错误: {e}", to, context_token)
-            finally:
-                await self.wx.set_typing(to_user=to, status=2, context_token=context_token)
+                except Exception as e:
+                    await self.wx.send_text(f"错误: {e}", to, context_token)
+                finally:
+                    await self.wx.set_typing(to_user=to, status=2, context_token=context_token)
 
         elif cmd in ["/todo", "/待办"]:
-            await self.wx.set_typing(to_user=to, status=1, context_token=context_token)
             try:
-                vault = self.cfg["vault"]
-                system_prefix = build_system_prompt(
-                    vault_root=vault["root"],
-                    daily_log_dir=vault["daily_log_dir"],
-                )
                 arg = text.strip()
                 for prefix in ["/todo", "/待办"]:
                     if arg.lower().startswith(prefix):
                         arg = arg[len(prefix):].strip()
                         break
                 if arg.lower() in ["list", "列表", "ls", ""]:
-                    log_path = get_log_path(vault["root"], vault["daily_log_dir"])
-                    content = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-                    import re
-                    match = re.search(
-                        r"(##\s*(?:\d+(?:\.\d+)?\s+)?📋\s*待办.*?)(?=##|\Z)",
-                        content,
-                        re.DOTALL,
+                    await self._local_view_with_optional_llm_fallback(
+                        "todo", to, context_token, text
                     )
-                    if match:
-                        await self.wx.send_text(match.group(1).strip(), to, context_token)
-                    else:
-                        await self.wx.send_text("📭 暂无待办", to, context_token)
                 elif arg.lower().startswith(("done ", "完成 ")):
-                    # 完成待办 → 让 AI 更新日志
-                    prompt = (
-                        f"{system_prefix}\n"
-                        f"用户完成了待办：「{arg.split(maxsplit=1)[1] if ' ' in arg else arg}」\n"
-                        f"请在日志的「## 📋 待办」节中找到对应的条目，将 - [ ] 改为 - [x]，加上 ✅HH:MM。\n"
-                        f"只回复确认信息。"
+                    done_text = arg.split(maxsplit=1)[1] if " " in arg else ""
+                    decision_text = f"我做完了：{done_text}" if done_text else "我做完了"
+                    decision = await self._llm_unified_decide(to, decision_text)
+                    handled = await self._apply_unified_decision(
+                        decision, to, context_token, user_text=decision_text
                     )
-                    reply, _ = await self.acp.prompt(self.session_id, prompt)
-                    await self.wx.send_text((reply or "").strip() or "✅ 已完成", to, context_token)
+                    if not handled:
+                        await self.wx.send_text("收到，你是想标记完成。你说下具体是哪个任务。", to, context_token)
                 else:
-                    prompt = (
-                        f"{system_prefix}\n"
-                        f"用户要添加待办：「{arg}」\n"
-                        f"请在日志的「## 📋 待办」节追加 - [ ] {arg}。\n"
-                        f"只回复确认信息。"
+                    decision = await self._llm_unified_decide(to, arg)
+                    handled = await self._apply_unified_decision(
+                        decision, to, context_token, user_text=arg
                     )
-                    reply, _ = await self.acp.prompt(self.session_id, prompt)
-                    await self.wx.send_text((reply or "").strip() or f"✅ 已添加待办：{arg}", to, context_token)
+                    if not handled:
+                        await self.wx.send_text("你可以直接说要做的几个小事，或问我“现在先做哪个”。", to, context_token)
             except Exception as e:
                 await self.wx.send_text(f"错误: {e}", to, context_token)
             finally:
-                await self.wx.set_typing(to_user=to, status=2, context_token=context_token)
+                with suppress(Exception):
+                    await self.wx.set_typing(to_user=to, status=2, context_token=context_token)
         elif cmd in ["/status", "/状态"]:
             status = "🟢 运行中" if self.acp.is_running else "🔴 已停止"
             model = self.cfg["opencode"].get("model", "?")
@@ -851,26 +1255,12 @@ class Handler:
                 to,
                 context_token,
             )
-        elif cmd in ["/today", "/今天"]:
-            await self.wx.set_typing(to_user=to, status=1, context_token=context_token)
-            try:
-                vault = self.cfg["vault"]
-                today = datetime.now()
-                log_path = f"{vault['root']}/{vault['daily_log_dir']}/{today.year}/{today.month:02d}/{today.strftime('%Y-%m-%d')}.md"
-                reply, reasoning = await self.acp.prompt(
-                    self.session_id,
-                    f"只回复摘要，不要输出分析过程。读取 {log_path}，简洁总结今天的生活记录。",
-                )
-                if reasoning:
-                    print(f"[Bot] 🧠 {reasoning[:200]}")
-                    _log_reasoning(f"/today", reasoning)
-                await self.wx.send_text(reply or "今天暂无记录", to, context_token)
-            except Exception as e:
-                await self.wx.send_text(f"错误: {e}", to, context_token)
-            finally:
-                await self.wx.set_typing(
-                    to_user=to, status=2, context_token=context_token
-                )
+        elif cmd in ["/today", "/今天", "/日志"]:
+            await self._local_view_with_optional_llm_fallback("log", to, context_token, text)
+        elif cmd in ["/record", "/记录"]:
+            await self._local_view_with_optional_llm_fallback("record", to, context_token, text)
+        elif cmd in ["/brief", "/简报"]:
+            await self._local_view_with_optional_llm_fallback("brief", to, context_token, text)
         elif cmd.startswith("/stat"):
             cat = text.split()[1] if len(text.split()) > 1 else ""
             if cat:
