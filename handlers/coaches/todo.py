@@ -396,6 +396,7 @@ class TodoCoachMixin:
         completed_count = min(idx + 1, total_count) if total_count > 0 else 0
         self._pending_reorders.pop(from_user, None)
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+        out = ""
         try:
             now_hm = time_str()
             prompt = self._write_todo_prompt(
@@ -405,12 +406,14 @@ class TodoCoachMixin:
                     "completed_at_hhmm": now_hm,
                 }
             )
-            await self.acp.prompt(self.todo_session_id, prompt, trace_tag="vault_mark_done")
+            out, _ = await self.acp.prompt(
+                self.todo_session_id, prompt, trace_tag="vault_mark_done"
+            )
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
         self._advance_queue_task(from_user)
         progress_text = f"({completed_count}/{total_count})" if total_count > 0 else ""
-        done_reply = (reply or "").strip()
+        done_reply = (reply or out or "").strip()
         if not done_reply:
             done_reply = (
                 f"✅ {current_task}完成 {progress_text}。"
