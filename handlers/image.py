@@ -1,8 +1,13 @@
-"""微信图片消息：下载、视觉描述、写入日志"""
+"""微信图片消息：下载 + 多模态描述 → 走和文字一样的 record.add 路径。
+
+不再 ad-hoc 拼 prompt 写盘；图片描述出来后构造一个 user_text 喂给统一决策层，
+分流 LLM 给出 record.add（含 category 推断），由 RecordCoachMixin 完成写入。
+"""
+
+from __future__ import annotations
 
 import json as _json
 
-from config import _log_reasoning
 from utils.flow_log import log_flow_event
 from utils.wechat_media import download_image
 
@@ -22,11 +27,12 @@ class ImageMixin:
             from_user=from_user,
             session_id=self.session_id,
         )
-        await self.wx.set_typing(
-            to_user=from_user, status=1, context_token=context_token
-        )
+        await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
-            print(f"[Bot] 🖼 收到图片, raw item: {_json.dumps(image_items[0], ensure_ascii=False)[:500]}")
+            print(
+                f"[Bot] 🖼 收到图片, raw item: "
+                f"{_json.dumps(image_items[0], ensure_ascii=False)[:500]}"
+            )
             img_data = await download_image(image_items[0], self.wx.session)
             if not img_data:
                 await self.wx.send_text("图片下载失败", from_user, context_token)
@@ -46,34 +52,37 @@ class ImageMixin:
                 trace_tag="vision_describe",
                 log_model=mm_model,
             )
-            image_desc = desc or "无法识别图片内容"
+            image_desc = (desc or "").strip() or "无法识别图片内容"
             print(f"[Bot] 👁 图片描述: {image_desc[:100]}")
 
-            system_prefix = (
-                "你是生活日志助手。用户发来一张图片，图片描述如下：\n"
-                f"「{image_desc}」\n"
-            )
+            # 把图片描述（+用户附言）当作普通文本，丢给统一分流决策。
+            user_text_for_route = f"[图片] {image_desc}"
             if text:
-                system_prefix += f"用户附言：「{text}」\n"
-            system_prefix += (
-                "你需要：\n"
-                "1. 分类：身体/运动/阅读/事务\n"
-                "2. 写入文件（用 fs/write_text_file）\n"
-                "3. 只回复一行简短确认，不要输出分析过程\n"
-            )
-            reply, reasoning = await self.acp.prompt(
-                self.session_id, system_prefix, trace_tag="image_write_log"
-            )
-            if reasoning:
-                _log_reasoning(f"[图片] {image_desc[:50]}", reasoning)
+                user_text_for_route = f"{user_text_for_route}\n附言：{text}"
 
-            reply = (reply or "已记录").strip()[
-                : self.cfg["bot"].get("max_reply_length", 2000)
-            ]
-            await self.wx.send_text(reply, from_user, context_token)
-            print(f"[Bot] >>> {(reply)[:80]}")
+            decision = await self._llm_unified_decide(from_user, user_text_for_route)
+            log_flow_event(
+                stage="route",
+                route="image_to_unified",
+                user_text=user_text_for_route,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"decision": decision},
+            )
+            handled = await self._apply_unified_decision(
+                decision,
+                from_user,
+                context_token,
+                user_text=user_text_for_route,
+            )
+            if not handled:
+                await self.wx.send_text(
+                    "我看到了图片，没看出要记什么。要我记成生活记录吗？",
+                    from_user,
+                    context_token,
+                )
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"[Bot] 图片处理错误: {e}")
             await self.wx.send_text(
                 f"图片处理出错: {str(e)[:100]}", from_user, context_token

@@ -15,6 +15,19 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+# ─── reminder 行解析正则（模块级常量；section_reader 与 log_sync 共用，避免漂移）───
+
+# 提醒节 H2 标题：## ⏰ 提醒（可带编号前缀 1.1）
+REMIND_SECTION_HEAD_RE = re.compile(r"^##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒")
+# 已触发：- [x] HH:MM：内容 ✅HH:MM
+REMIND_DONE_LINE_RE = re.compile(
+    r"^- \[x\]\s*(?:.*?)(\d{1,2}:\d{2})[：:]\s*(.+?)\s*✅"
+)
+# 未触发：- [ ] HH:MM：内容
+REMIND_PENDING_LINE_RE = re.compile(
+    r"^- \[ \]\s*(?:.*?)(\d{1,2}:\d{2})[：:]\s*(.+)"
+)
+
 
 def get_log_path(vault_root: str, daily_log_dir: str, dt: datetime = None) -> Path:
     """返回日志文件路径：vault_root/daily_log_dir/YYYY/MM/YYYY-MM-DD.md"""
@@ -22,54 +35,53 @@ def get_log_path(vault_root: str, daily_log_dir: str, dt: datetime = None) -> Pa
     return Path(vault_root) / daily_log_dir / str(dt.year) / f"{dt.month:02d}" / dt.strftime("%Y-%m-%d.md")
 
 
-def parse_reminders_from_log(log_path: Path) -> list[dict]:
-    """从日志文件解析 ⏰ 提醒 节
+def parse_reminder_lines(text_lines: list[str]) -> list[dict]:
+    """对一组 markdown 行（已 split 过的）按提醒节解析。
 
-    返回: [{"time": "07:30", "text": "上班", "done": False, "line": 5}, ...]
+    遇到第一行匹配 REMIND_SECTION_HEAD_RE 视为进入提醒节；
+    再遇到任何 `##` 起始视为退出。返回：
+        [{"time": "07:30", "text": "上班", "done": False, "line": 5}, ...]
     """
+    reminders: list[dict] = []
+    in_section = False
+    for i, line in enumerate(text_lines):
+        stripped = line.strip()
+        if REMIND_SECTION_HEAD_RE.match(stripped):
+            in_section = True
+            continue
+        if in_section and stripped.startswith("##"):
+            break
+        if not (in_section and stripped.startswith("- ")):
+            continue
+        m_done = REMIND_DONE_LINE_RE.match(stripped)
+        if m_done:
+            reminders.append(
+                {
+                    "time": m_done.group(1),
+                    "text": m_done.group(2).strip(),
+                    "done": True,
+                    "line": i,
+                }
+            )
+            continue
+        m_pending = REMIND_PENDING_LINE_RE.match(stripped)
+        if m_pending:
+            reminders.append(
+                {
+                    "time": m_pending.group(1),
+                    "text": m_pending.group(2).strip(),
+                    "done": False,
+                    "line": i,
+                }
+            )
+    return reminders
+
+
+def parse_reminders_from_log(log_path: Path) -> list[dict]:
+    """从日志文件解析 ⏰ 提醒 节（薄包装：读盘后委托给 parse_reminder_lines）。"""
     if not log_path.exists():
         return []
-
-    lines = log_path.read_text(encoding="utf-8").split("\n")
-    reminders = []
-    in_remind_section = False
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        # 进入提醒节
-        if re.match(r"^##\s*(?:\d+(?:\.\d+)?\s+)?⏰\s*提醒", stripped):
-            in_remind_section = True
-            continue
-        # 离开提醒节（遇到下一个 ##）
-        if in_remind_section and stripped.startswith("##"):
-            break
-        # 解析提醒行
-        if in_remind_section and stripped.startswith("- "):
-            # 已触发的: - [x] 07:30：上班 ✅07:30
-            done_match = re.match(
-                r"^- \[x\]\s*(?:.*?)(\d{1,2}:\d{2})[：:]\s*(.+?)\s*✅",
-                stripped,
-            )
-            if done_match:
-                reminders.append({
-                    "time": done_match.group(1),
-                    "text": done_match.group(2).strip(),
-                    "done": True, "line": i,
-                })
-                continue
-            # 未触发的: - [ ] 07:30：上班
-            pending_match = re.match(
-                r"^- \[ \]\s*(?:.*?)(\d{1,2}:\d{2})[：:]\s*(.+)",
-                stripped,
-            )
-            if pending_match:
-                reminders.append({
-                    "time": pending_match.group(1),
-                    "text": pending_match.group(2).strip(),
-                    "done": False, "line": i,
-                })
-
-    return reminders
+    return parse_reminder_lines(log_path.read_text(encoding="utf-8").split("\n"))
 
 
 def mark_reminder_done(log_path: Path, line_num: int, now_str: str = "") -> bool:
@@ -87,6 +99,29 @@ def mark_reminder_done(log_path: Path, line_num: int, now_str: str = "") -> bool
     lines[line_num] = line.replace("- [ ]", f"- [x]", 1) + f" ✅{now_str}"
     log_path.write_text("\n".join(lines), encoding="utf-8")
     return True
+
+
+def mark_reminder_done_by_time_text(
+    log_path: Path,
+    remind_time: str,
+    remind_text: str,
+    now_str: str = "",
+) -> bool:
+    """按「时间+文本」标记提醒完成，避免行号在并发写入后失效。"""
+    if not log_path.exists():
+        return False
+    now_str = now_str or datetime.now().strftime("%H:%M")
+    lines = log_path.read_text(encoding="utf-8").split("\n")
+    escaped_text = re.escape((remind_text or "").strip())
+    target_re = re.compile(
+        rf"^\s*-\s*\[\s\]\s*(?:.*?){re.escape(remind_time)}[：:]\s*{escaped_text}\s*$"
+    )
+    for i, line in enumerate(lines):
+        if target_re.match(line.strip()):
+            lines[i] = line.replace("- [ ]", "- [x]", 1) + f" ✅{now_str}"
+            log_path.write_text("\n".join(lines), encoding="utf-8")
+            return True
+    return False
 
 
 def get_due_reminders(log_path: Path, now: datetime = None) -> list[dict]:

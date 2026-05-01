@@ -10,6 +10,11 @@ opencode:
   model: "deepseek/deepseek-v4-flash"        # 默认文本模型
   multimodal_model: "alibaba-cn/qwen3-vl-plus"   # 多模态（图片）模型
 
+  # 意图小模型（兜底层；缺省 = 主 model）
+  intent_model: "alibaba-cn/qwen3.5-flash"
+  intent_threshold_high: 0.8   # >= high → 直接 dispatcher
+  intent_threshold_mid: 0.5    # >= mid && < high → 作 hint 给 unified；< mid → safe_fallback
+
 # ─── Vault 路径 ───
 vault:
   root: "D:/Lenovo/Documents/世界树/世界树"

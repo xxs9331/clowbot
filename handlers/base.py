@@ -4,8 +4,7 @@ import asyncio
 import json
 import re
 
-from acp.opencode_client import OpenCodeACP, build_system_prompt
-from config import _log_reasoning
+from acp.opencode_client import OpenCodeACP
 from utils.intent import (
     INTENT_QUERY_REMIND,
     INTENT_QUERY_TODO,
@@ -13,27 +12,55 @@ from utils.intent import (
     detect_intent,
 )
 from utils.flow_log import log_flow_event, snapshot_todo_queue
+from utils.intent_bridge import intent_to_decision
+from utils.intent_llm import classify_intent
 from utils.route_fast import build_fast_unified_decision
 from wechat.client import ClawBotClient
 
-from .commands import CommandsMixin
+from .coaches import RecordCoachMixin, RemindCoachMixin, TodoCoachMixin
+from .dispatcher import DispatcherMixin
 from .image import ImageMixin
 from .local_view import LocalViewMixin
-from .todo import TodoMixin
 
 
-class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
+class Handler(
+    LocalViewMixin,
+    ImageMixin,
+    DispatcherMixin,
+    TodoCoachMixin,
+    RecordCoachMixin,
+    RemindCoachMixin,
+):
+    """ClawBot 业务总入口（Mixin 组合）。
+
+    Mixin 职责：
+      - LocalViewMixin    本地读今日 md，输出查看类回复
+      - ImageMixin        图片消息：多模态描述 → 走 record.add
+      - DispatcherMixin   决策与分发（_llm_unified_decide / _apply_unified_decision）
+      - TodoCoachMixin    待办 8 个 coach + 内存队列
+      - RecordCoachMixin  生活记录写入
+      - RemindCoachMixin  提醒写入（写完由 hooks 自动唤醒调度器）
+
+    共享状态（按读写者标注）：
+      - _reminded_ids:        set[str]                    scheduler/reminders 读写（写后行去重）
+      - _reminder_refresh:    asyncio.Event               RemindCoach 写 / scheduler 读
+      - _todo_queues:         {user_id: {tasks, idx}}     TodoCoachMixin 读写
+      - _pending_reorders:    {user_id: [tasks]}          TodoCoachMixin 读写
+      - _local_view_last:     {(user, kind): (ts, msg)}   LocalViewMixin 读写
+      - _local_view_debounce_sec: float                   LocalViewMixin 只读
+    """
+
     def __init__(self, acp: OpenCodeACP, config: dict, wechat: ClawBotClient):
         self.acp = acp
         self.cfg = config
         self.wx = wechat
-        self.session_id = ""
-        self._reminded_ids = set()  # 已触发的提醒（避免重复推送）
-        self._reminder_refresh = asyncio.Event()
-        self._todo_queues = {}  # 用户维度短期待办队列
-        self._pending_reorders = {}  # 用户维度重排确认缓存
-        self._local_view_last = {}
-        self._local_view_debounce_sec = 2.0
+        self.session_id: str = ""
+        self._reminded_ids: set[str] = set()
+        self._reminder_refresh: asyncio.Event = asyncio.Event()
+        self._todo_queues: dict[str, dict] = {}
+        self._pending_reorders: dict[str, list[str]] = {}
+        self._local_view_last: dict[tuple[str, str], tuple[float, str]] = {}
+        self._local_view_debounce_sec: float = 2.0
 
     async def init_session(self):
         """初始化 ACP session 并设置模型"""
@@ -89,8 +116,15 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
         if not text:
             return
 
+        # 个人使用不发斜杠命令；以 / 开头的统一忽略，避免被 LLM 当成自然语言乱解释。
         if text.startswith("/"):
-            await self._cmd(text, from_user, context_token)
+            log_flow_event(
+                stage="route",
+                route="ignore_slash",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+            )
             return
 
         local_kind = self._detect_local_view_kind(text)
@@ -155,15 +189,77 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                 if handled_fast:
                     return
 
+            # ─── 小模型意图分类兜底（只在规则/fast 都未命中时触发）───
+            oc_cfg = self.cfg.get("opencode", {}) or {}
+            high_th = float(oc_cfg.get("intent_threshold_high", 0.8) or 0.8)
+            mid_th = float(oc_cfg.get("intent_threshold_mid", 0.5) or 0.5)
+            intent_model = oc_cfg.get("intent_model") or None
+            queue_state = snapshot_todo_queue(self._todo_queues, from_user)
+            intent_obj = await classify_intent(
+                self.acp,
+                model=intent_model,
+                text=text,
+                queue_state=queue_state,
+                from_user=from_user,
+            )
+            intent_hint = None
+            if intent_obj:
+                conf = float(intent_obj.get("confidence", 0.0))
+                log_flow_event(
+                    stage="route",
+                    route="intent_llm",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                    extra={
+                        "intent": intent_obj.get("intent"),
+                        "slots": intent_obj.get("slots", {}),
+                        "confidence": conf,
+                        "queue": queue_state,
+                    },
+                )
+                if conf >= high_th:
+                    decision = intent_to_decision(intent_obj)
+                    if decision:
+                        handled_sm = await self._apply_unified_decision(
+                            decision,
+                            from_user,
+                            context_token,
+                            user_text=text,
+                        )
+                        log_flow_event(
+                            stage="exit",
+                            route="intent_llm",
+                            user_text=text,
+                            from_user=from_user,
+                            session_id=self.session_id,
+                            extra={
+                                "handled": handled_sm,
+                                "intent_source": "small_model",
+                                "intent_confidence": conf,
+                                "intent_slots": intent_obj.get("slots", {}),
+                                "decision": decision,
+                            },
+                        )
+                        if handled_sm:
+                            return
+                if conf >= mid_th:
+                    intent_hint = intent_obj
+
             log_flow_event(
                 stage="route",
                 route="llm_unified_enter",
                 user_text=text,
                 from_user=from_user,
                 session_id=self.session_id,
-                extra={"queue": snapshot_todo_queue(self._todo_queues, from_user)},
+                extra={
+                    "queue": queue_state,
+                    "intent_hint": intent_hint,
+                },
             )
-            decision = await self._llm_unified_decide(from_user, text)
+            decision = await self._llm_unified_decide(
+                from_user, text, intent_hint=intent_hint
+            )
             handled = await self._apply_unified_decision(
                 decision,
                 from_user,
@@ -179,6 +275,8 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                 extra={
                     "handled": handled,
                     "decision": decision,
+                    "intent_source": "unified",
+                    "intent_hint": intent_hint,
                 },
             )
             if handled:
@@ -194,25 +292,19 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                     session_id=self.session_id,
                     extra={"remind_payload": data},
                 )
-                vault = self.cfg["vault"]
-                system_prefix = build_system_prompt(
-                    vault_root=vault["root"],
-                    daily_log_dir=vault["daily_log_dir"],
+                # data 形如 "07:30：上班" 或 "上班"（无时间则缺 hhmm，由 remind.add 兜底要时间）
+                hhmm, _, remind_text = data.partition("：")
+                remind_text = remind_text.strip() or data
+                hhmm = hhmm.strip()
+                decision = {
+                    "tool": "remind.add",
+                    "payload": {"text": remind_text, "hhmm": hhmm},
+                    "reply": "",
+                }
+                await self._apply_unified_decision(
+                    decision, from_user, context_token, user_text=text
                 )
-                prompt = (
-                    f"{system_prefix}\n"
-                    f"用户要设置提醒：「{data}」\n"
-                    f"请在日志的「## ⏰ 提醒」节追加一行：\n"
-                    f"- [ ] {data}\n"
-                    f"如果该节不存在则创建。只回复确认信息。"
-                )
-                reply, _ = await self.acp.prompt(
-                    self.session_id, prompt, trace_tag="intent_remind_append"
-                )
-                reply = (reply or "").strip()[:2000]
-                await self.wx.send_text(reply or f"⏰ 已记录提醒：{data}", from_user, context_token)
                 print(f"[Bot] ⏰ 提醒: {data}")
-                self.notify_reminder_refresh()
                 return
             if intent == INTENT_QUERY_REMIND:
                 log_flow_event(
@@ -227,32 +319,27 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                 )
                 return
 
+            # 安全兜底：所有路由都没接住 → 不让 LLM 自由写盘，回固定模板，
+            # 同时把意图信息写进 flow log，便于事后复盘补充规则。
             log_flow_event(
                 stage="route",
-                route="life_fallback",
+                route="safe_fallback",
                 user_text=text,
                 from_user=from_user,
                 session_id=self.session_id,
-                extra={"intent": intent, "intent_data": data},
+                extra={
+                    "intent": intent,
+                    "intent_data": data,
+                    "intent_source": "safe_fallback",
+                    "intent_hint": intent_hint,
+                },
             )
-            vault = self.cfg["vault"]
-            system_prefix = build_system_prompt(
-                vault_root=vault["root"],
-                daily_log_dir=vault["daily_log_dir"],
-                project_dir=vault.get("project_dir", ""),
-                task_dir=vault.get("task_dir", ""),
+            await self.wx.send_text(
+                "我没看懂这条要怎么记。要我把它当作生活记录写进今日日记吗？回「记一下」即可。",
+                from_user,
+                context_token,
             )
-            reply, reasoning = await self.acp.prompt(
-                self.session_id,
-                f"{system_prefix}\n用户发来：「{text}」",
-                trace_tag="life_fallback",
-            )
-            if reasoning:
-                print(f"[Bot] 🧠 {reasoning[:200]}")
-                _log_reasoning(text, reasoning)
-            reply = (reply or "").strip()[: self.cfg["bot"].get("max_reply_length", 2000)]
-            await self.wx.send_text(reply or "收到", from_user, context_token)
-            print(f"[Bot] >>> {(reply or '收到')[:80]}")
+            print(f"[Bot] >>> safe_fallback: {text[:60]}")
         except Exception as e:
             print(f"[Bot] error: {e}")
             if self.cfg["bot"].get("reply_on_error", True):

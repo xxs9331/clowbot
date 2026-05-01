@@ -22,6 +22,7 @@ from acp.opencode_client import OpenCodeACP
 from config import load_config
 from handlers import Handler
 from scheduler.archive import auto_archive_loop
+from scheduler.log_rotation import log_rotation_loop
 from scheduler.reminders import remind_check_loop
 from wechat import ClawBotClient
 
@@ -39,6 +40,7 @@ async def main():
     wx = ClawBotClient(config.get("bot", {}))
     archive_task = None
     remind_task = None
+    log_rotate_task = None
 
     try:
         await acp.start()
@@ -56,6 +58,7 @@ async def main():
 
         archive_task = asyncio.create_task(auto_archive_loop(acp, config, h))
         remind_task = asyncio.create_task(remind_check_loop(h))
+        log_rotate_task = asyncio.create_task(log_rotation_loop())
 
         print(f"[Bot] Ready ✓ 微信生活日志助手已启动")
         print(f"[Bot] 已提醒缓存数: {len(h._reminded_ids)}")
@@ -76,7 +79,7 @@ async def main():
                     print("[Bot] 重新登录失败，退出")
                     break
 
-                for task in (archive_task, remind_task):
+                for task in (archive_task, remind_task, log_rotate_task):
                     if task:
                         task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -86,12 +89,13 @@ async def main():
                 await h.init_session()
                 archive_task = asyncio.create_task(auto_archive_loop(acp, config, h))
                 remind_task = asyncio.create_task(remind_check_loop(h))
+                log_rotate_task = asyncio.create_task(log_rotation_loop())
                 print("[Bot] Ready ✓ 重新连接成功")
             else:
                 print("[Bot] 5秒后重试...")
                 await asyncio.sleep(5)
     finally:
-        for task in (archive_task, remind_task):
+        for task in (archive_task, remind_task, log_rotate_task):
             if task:
                 task.cancel()
                 with suppress(asyncio.CancelledError):

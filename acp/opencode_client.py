@@ -548,9 +548,23 @@ class OpenCodeACP:
         return reply, reasoning
 
 
+def _coach_skill_path(vault_root: str, name: str) -> str:
+    return str(Path(vault_root).resolve() / ".opencode" / "skills" / name / "SKILL.md")
+
+
 def todo_coach_skill_path(vault_root: str) -> str:
     """OpenCode 技能 todo-coach 的绝对路径（与 ACP cwd 下 .opencode 一致）。"""
-    return str(Path(vault_root).resolve() / ".opencode" / "skills" / "todo-coach" / "SKILL.md")
+    return _coach_skill_path(vault_root, "todo-coach")
+
+
+def record_coach_skill_path(vault_root: str) -> str:
+    """OpenCode 技能 record-coach 的绝对路径。"""
+    return _coach_skill_path(vault_root, "record-coach")
+
+
+def remind_coach_skill_path(vault_root: str) -> str:
+    """OpenCode 技能 remind-coach 的绝对路径。"""
+    return _coach_skill_path(vault_root, "remind-coach")
 
 
 def build_todo_coach_skill_binding(vault_root: str) -> str:

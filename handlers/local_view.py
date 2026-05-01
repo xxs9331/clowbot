@@ -7,6 +7,7 @@ from pathlib import Path
 from acp.opencode_client import build_system_prompt
 from config import _log_reasoning
 from utils.log_sync import get_log_path
+from utils.section_reader import extract_section_text
 
 
 class LocalViewMixin:
@@ -16,10 +17,8 @@ class LocalViewMixin:
 
     @staticmethod
     def _extract_section(content: str, emoji: str, title: str) -> str:
-        # 只在「二级标题」处结束：行首为 ## + 空格。若用 (?=##|\Z)，会在 ### 处误匹配（### 以 ## 开头）。
-        pattern = rf"(##\s*(?:\d+(?:\.\d+)?\s+)?{re.escape(emoji)}\s*{re.escape(title)}.*?)(?=^## |\Z)"
-        match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
-        return match.group(1).strip() if match else ""
+        """薄包装：保持旧接口（含 H2 标题的整段字符串），实现交由 section_reader。"""
+        return extract_section_text(content, emoji, title, include_heading=True)
 
     def _log_local_view_obs(
         self,

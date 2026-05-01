@@ -4,16 +4,23 @@ import asyncio
 import heapq
 from datetime import datetime
 
-from utils.log_sync import get_log_path, mark_reminder_done, parse_reminders_from_log
+from utils.log_sync import (
+    get_log_path,
+    mark_reminder_done_by_time_text,
+)
+from utils.section_reader import read_remind_section
 
 
 def build_today_reminder_heap(handler):
-    """从今日日志提取未完成提醒，构建最小堆（按触发时间）"""
+    """从今日日志提取未完成提醒，构建最小堆（按触发时间）。
+
+    解析入口收敛到 utils.section_reader.read_remind_section（内部仍走 log_sync 正则与 line 字段）。
+    """
     vault = handler.cfg["vault"]
     log_path = get_log_path(vault["root"], vault["daily_log_dir"])
     today = datetime.now().date()
     heap = []
-    for r in parse_reminders_from_log(log_path):
+    for r in read_remind_section(log_path).get("items", []):
         if r["done"]:
             continue
         try:
@@ -23,7 +30,7 @@ def build_today_reminder_heap(handler):
             )
         except Exception:
             continue
-        rid = f"{today.isoformat()}:{r['line']}:{r['time']}"
+        rid = f"{today.isoformat()}:{r['time']}:{r['text']}"
         heapq.heappush(heap, (due_dt, rid, r))
     return log_path, heap
 
@@ -72,8 +79,9 @@ async def remind_check_loop(handler):
                     await handler.wx.send_text(msg, handler.wx.user_id, "")
                 print(f"[Bot] ⏰ 提醒触发: {r['text']}")
 
-                ok = mark_reminder_done(log_path, r["line"])
+                ok = mark_reminder_done_by_time_text(log_path, r["time"], r["text"])
                 if ok:
+                    # 去重键使用时间+文本，避免行号变化导致同提醒重复触发
                     handler._reminded_ids.add(rid)
                     print(f"[Bot] ⏰ 提醒已标记完成: {r['text']}")
                 else:

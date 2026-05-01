@@ -1,36 +1,12 @@
-"""确定性快通道：在 _llm_unified_decide 之前将常见句式映射为统一 decision。"""
+"""确定性快通道：仅保留元问题澄清，业务意图交给小模型分类层。
+
+tool 名常量唯一来源是 utils.tool_names；本文件不再保留字面量副本，避免漂移。
+（与 handlers.* 不存在循环依赖，因为 utils.tool_names 是叶子模块）
+"""
 
 import re
 
-from handlers.todo import (
-    TOOL_DECISION_NONE,
-    TOOL_DONE_CURRENT,
-    TOOL_MERGE_NEW_ITEMS,
-    TOOL_NEXT,
-    TOOL_NOT_DONE,
-)
-from utils.intent import (
-    INTENT_TODO,
-    INTENT_TODO_DONE,
-    INTENT_TODO_NEXT,
-    INTENT_TODO_NOT_DONE,
-    detect_intent,
-)
-
-
-def _split_todo_items(text: str) -> list[str]:
-    """与 Handler._split_todo_items 一致，避免 handlers 循环依赖。"""
-    cleaned = text.strip().strip("。.!！")
-    cleaned = cleaned.replace("然后", "，").replace("再", "，")
-    parts = re.split(r"[,，、;；\n]+", cleaned)
-    items = []
-    for part in parts:
-        item = re.sub(r"^[-\d\.\)\(、\s]+", "", part).strip()
-        item = item.strip("：: ")
-        if item:
-            items.append(item)
-    return items
-
+from utils.tool_names import TOOL_DECISION_NONE
 
 _META_TODO_CLARIFY = re.compile(
     r"(skill|skills|SKILL|技能|路由|元问题|怎么判定|调用.*skill|待办.*skill|走.*skill)",
@@ -52,7 +28,11 @@ def build_fast_unified_decision(
     user_id: str,
     todo_queues: dict,
 ) -> dict | None:
-    """命中快通道时返回 tool + payload + reply（与 _apply_unified_decision 一致），否则 None。"""
+    """命中快通道时返回 decision，否则 None。
+
+    当前策略：仅处理「有活跃待办队列 + 询问技能/路由元问题」。
+    其它 todo/record/remind 意图统一交由小模型分类层 + unified 决策层。
+    """
 
     if _has_active_todo_queue(user_id, todo_queues) and _META_TODO_CLARIFY.search(text):
         return {
@@ -60,19 +40,5 @@ def build_fast_unified_decision(
             "payload": {},
             "reply": "催办和动作判定由 OpenCode 工程里加载的待办 SKILL 管；我这边按当前内存队列推进。",
         }
-
-    intent, data = detect_intent(text)
-
-    if intent == INTENT_TODO_DONE:
-        return {"tool": TOOL_DONE_CURRENT, "payload": {}, "reply": ""}
-    if intent == INTENT_TODO_NEXT:
-        return {"tool": TOOL_NEXT, "payload": {}, "reply": ""}
-    if intent == INTENT_TODO_NOT_DONE:
-        return {"tool": TOOL_NOT_DONE, "payload": {}, "reply": ""}
-
-    if intent == INTENT_TODO and data:
-        tasks = _split_todo_items(data)
-        if tasks:
-            return {"tool": TOOL_MERGE_NEW_ITEMS, "payload": {"tasks": tasks}, "reply": ""}
 
     return None

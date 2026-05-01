@@ -70,6 +70,46 @@ def detect_intent(text: str) -> tuple[str, str]:
         return INTENT_REMIND, reminder_text
 
     # ─── 待办意图 ───
+    # 兜住“使用下山待办模板添加待办 / 用下山流程模板加待办”这类前置模板句式。
+    m = re.match(
+        r"^\s*(?:使用|用)\s*(.+?)\s*(?:添加|加入|导入|加上|新增|安排)\s*(?:待办|代办|todo)\s*$",
+        text,
+        flags=re.I,
+    )
+    if m:
+        stem = m.group(1).strip()
+        stem = re.sub(r'^[:：\s—\-]+', '', stem).strip()
+        # “下山待办模板”统一成“下山模板”
+        stem = re.sub(r"(?:待办|代办)\s*模板$", "模板", stem).strip()
+        if stem:
+            return INTENT_TODO, stem
+
+    # 先兜住“添加上山模板待办 / 添加xxx待办”这类尾部待办句式，
+    # 避免命中 kw="待办" 后 todo_text 为空而误判为 none。
+    m = re.match(
+        r"^\s*(?:添加|加入|导入|加上|新增|安排)\s*(.+?)\s*(?:的)?\s*(?:待办|代办|todo)\s*$",
+        text,
+        flags=re.I,
+    )
+    if m:
+        todo_text = m.group(1).strip()
+        todo_text = re.sub(r'^[:：\s—\-]+', '', todo_text).strip()
+        if todo_text:
+            return INTENT_TODO, todo_text
+
+    # 兜住“添加下山待办模板 / 添加下山模板”这类模板导入句式，避免只提取出“模板”。
+    m = re.match(
+        r"^\s*(?:添加|加入|导入|加上|新增|安排)\s*(.+?)\s*(?:待办|代办)?\s*模板\s*$",
+        text,
+        flags=re.I,
+    )
+    if m:
+        stem = m.group(1).strip()
+        stem = re.sub(r'^[:：\s—\-]+', '', stem).strip()
+        stem = re.sub(r'(?:待办|代办)\s*$', '', stem).strip()
+        if stem:
+            return INTENT_TODO, f"{stem}模板"
+
     todo_kws = ["记个待办", "记个代办", "加个待办", "加个代办",
                  "待办", "代办", "todo",
                  "记一下", "帮我记", "记个", "加个任务",
