@@ -7,12 +7,26 @@
 from __future__ import annotations
 
 import json as _json
+import re
 
 from utils.flow_log import log_flow_event
 from utils.wechat_media import download_image
 
 
 class ImageMixin:
+    @staticmethod
+    def _pick_vision_desc(desc: str, reasoning: str) -> str:
+        """优先用 reply；为空时回退到 reasoning，避免多模态文本丢失。"""
+        d = (desc or "").strip()
+        if d:
+            return d
+        r = (reasoning or "").strip()
+        if not r:
+            return "无法识别图片内容"
+        # 清掉常见提示复读前缀，尽量保留可见内容描述本体。
+        r = re.sub(r"^\s*我们被要求[^。\n]*[。\n]\s*", "", r, count=1).strip()
+        return r or "无法识别图片内容"
+
     async def _handle_image(self, msg: dict) -> None:
         text = msg.get("text", "").strip()
         from_user = msg.get("from", "")
@@ -45,14 +59,14 @@ class ImageMixin:
             )
             vision_sid = await self.acp.create_session(mm_model)
 
-            desc, _ = await self.acp.prompt_with_image(
+            desc, reasoning = await self.acp.prompt_with_image(
                 vision_sid,
                 "用简洁的中文描述这张图片的内容，只描述可见内容，不要推理。",
                 img_data,
                 trace_tag="vision_describe",
                 log_model=mm_model,
             )
-            image_desc = (desc or "").strip() or "无法识别图片内容"
+            image_desc = self._pick_vision_desc(desc, reasoning)
             print(f"[Bot] 👁 图片描述: {image_desc[:100]}")
 
             # 把图片描述（+用户附言）当作普通文本，丢给统一分流决策。

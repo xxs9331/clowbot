@@ -102,7 +102,15 @@ class DispatcherMixin:
         prompt = (
             f"{hint_block}"
             "你是微信个人助手。待办话术与意图划分以 todo-coach 为准；生活记录以 record-coach 为准；"
-            "提醒以 remind-coach 为准。只输出 JSON，不要其它内容。\n"
+            "提醒以 remind-coach 为准。你必须只输出一个合法 JSON 对象，不要其它内容。\n"
+            "输出格式硬约束（必须全部满足）：\n"
+            "1) 仅输出 1 行 JSON，对象根节点必须包含 tool、payload、reply 三个键\n"
+            "2) 使用双引号，不要单引号，不要注释，不要 markdown，不要代码块\n"
+            "3) reply 必须是 JSON 字符串；若需要换行，必须写成 \\\\n，禁止直接写真实换行\n"
+            "4) 若不确定，输出 {\"tool\":\"none\",\"payload\":{},\"reply\":\"\"}\n"
+            "5) 严禁在 JSON 前后输出任何说明文字\n"
+            "请严格按这个骨架输出："
+            "{\"tool\":\"<tool>\",\"payload\":{},\"reply\":\"<reply>\"}\n"
             "字段：\n"
             "- tool: 字符串，取值之一：\n"
             f'  待办：{TOOL_TODO_MERGE_NEW_ITEMS} | {TOOL_TODO_DONE_CURRENT} | {TOOL_TODO_NOT_DONE} | '

@@ -62,6 +62,7 @@ def _build_prompt(text: str, queue_state: dict | None) -> str:
         "重要约束：\n"
         "- template_name 不允许是泛词（如\"模板\"\"待办模板\"\"流程模板\"），否则置空并降低 confidence\n"
         "- 倒装/纠错句（\"不是上山是下山流程模板\"）应识别为 todo_add，slots.template_name=下山流程模板\n"
+        "- 含引用/转述触发词（如“回‘记一下’即可”“你回记一下”）且语义是澄清时，应判 none，不得判 todo_add\n"
         "\n"
         "示例：\n"
         '输入：添加上山模板待办 → {"intent":"todo_add","slots":{"template_name":"上山模板"},"confidence":0.92}\n'
@@ -70,6 +71,7 @@ def _build_prompt(text: str, queue_state: dict | None) -> str:
         '输入：体重 78kg → {"intent":"record_add","slots":{"text":"体重 78kg","category":"身体"},"confidence":0.92}\n'
         '输入：先跳过这个 → {"intent":"todo_skip","slots":{},"confidence":0.85}\n'
         '输入：今天有什么待办 → {"intent":"query_todo","slots":{},"confidence":0.9}\n'
+        '输入：我没看懂这条要怎么记。要我把它当作生活记录写进今日日记吗？回「记一下」即可。 → {"intent":"none","slots":{},"confidence":0.25}\n'
         '输入：好的 → {"intent":"none","slots":{},"confidence":0.3}\n'
         "\n"
         f"队列状态: {json.dumps(queue, ensure_ascii=False)}\n"

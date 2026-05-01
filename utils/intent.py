@@ -31,6 +31,13 @@ def detect_intent(text: str) -> tuple[str, str]:
     if not text:
         return INTENT_NONE, ""
 
+    # 澄清/引用类话术（如“回「记一下」即可”）不视为真实待办指令。
+    if (
+        ("回" in text and "记一下" in text and any(k in text for k in ["即可", "就行", "就可以"]))
+        or ("没看懂" in text and "怎么记" in text)
+    ):
+        return INTENT_NONE, ""
+
     # ─── 查询类意图（优先） ───
     query_todo_kws = ["查看待办", "看待办", "待办列表", "待办清单", "有什么待办",
                        "有什么事", "要做什么", "今天的待办", "今日待办"]
@@ -110,11 +117,20 @@ def detect_intent(text: str) -> tuple[str, str]:
         if stem:
             return INTENT_TODO, f"{stem}模板"
 
-    todo_kws = ["记个待办", "记个代办", "加个待办", "加个代办",
-                 "待办", "代办", "todo",
-                 "记一下", "帮我记", "记个", "加个任务",
-                 "别忘了", "别忘", "记得", "要记得"]
-    for kw in todo_kws:
+    strong_todo_kws = [
+        "记个待办",
+        "记个代办",
+        "加个待办",
+        "加个代办",
+        "待办",
+        "代办",
+        "todo",
+        "别忘了",
+        "别忘",
+        "记得",
+        "要记得",
+    ]
+    for kw in strong_todo_kws:
         if kw in text:
             idx = text.index(kw)
             todo_text = text[idx + len(kw):].strip()
@@ -122,6 +138,17 @@ def detect_intent(text: str) -> tuple[str, str]:
             if todo_text:
                 return INTENT_TODO, todo_text
             break
+
+    # 弱触发词只在句首命令场景生效，减少普通聊天误判。
+    weak_prefix_kws = ["记一下", "帮我记", "记个", "加个任务"]
+    for kw in weak_prefix_kws:
+        m = re.match(rf"^\s*(?:请\s*)?{re.escape(kw)}\s*[:：]?\s*(.+)$", text, flags=re.I)
+        if not m:
+            continue
+        todo_text = m.group(1).strip()
+        todo_text = re.sub(r'^[:：\s—\-]+', '', todo_text).strip()
+        if todo_text:
+            return INTENT_TODO, todo_text
 
     return INTENT_NONE, ""
 

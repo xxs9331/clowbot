@@ -45,6 +45,8 @@ class OpenCodeACP:
         # 响应和通知队列
         self._response_queue = asyncio.Queue()
         self._notification_handler: Optional[Callable] = None
+        # 单通道 JSON-RPC：同一时刻仅允许一个 in-flight 请求消费队列，避免串包
+        self._rpc_lock = asyncio.Lock()
 
     # ─── 生命周期管理 ───
 
@@ -247,32 +249,33 @@ class OpenCodeACP:
         self, method: str, params: dict = None, timeout: float = 120
     ) -> dict:
         """发送请求并等待匹配的响应，同时处理 agent→client 请求"""
-        msg_id = self._send(method, params)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                msg = await asyncio.wait_for(self._response_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if self._proc and self._proc.poll() is not None:
-                    raise RuntimeError("opencode acp process exited")
-                continue
+        async with self._rpc_lock:
+            msg_id = self._send(method, params)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(self._response_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if self._proc and self._proc.poll() is not None:
+                        raise RuntimeError("opencode acp process exited")
+                    continue
 
-            # Agent→Client 请求 → 自动处理
-            if (
-                "method" in msg
-                and "id" in msg
-                and "result" not in msg
-                and "error" not in msg
-            ):
-                self._handle_agent_request(msg)
-                continue
+                # Agent→Client 请求 → 自动处理
+                if (
+                    "method" in msg
+                    and "id" in msg
+                    and "result" not in msg
+                    and "error" not in msg
+                ):
+                    self._handle_agent_request(msg)
+                    continue
 
-            # 匹配请求 ID 的响应
-            if msg.get("id") == msg_id:
-                return msg
+                # 匹配请求 ID 的响应
+                if msg.get("id") == msg_id:
+                    return msg
 
-            # 其他响应或通知，跳过
-        raise TimeoutError(f"Timeout waiting for response to {method}")
+                # 其他响应或通知，跳过
+            raise TimeoutError(f"Timeout waiting for response to {method}")
 
     # ─── 文本提取 ───
 
@@ -306,7 +309,13 @@ class OpenCodeACP:
 
     # ─── 收集流式响应 ───
 
-    async def _collect_prompt_response(self, msg_id: int, timeout: float = 180) -> dict:
+    async def _collect_prompt_response(
+        self,
+        msg_id: int,
+        *,
+        session_id: str = "",
+        timeout: float = 180,
+    ) -> dict:
         """收集 session/prompt 的所有响应（包含流式通知和最终结果）
 
         返回:
@@ -345,7 +354,18 @@ class OpenCodeACP:
 
             # session/update 通知
             if msg.get("method") == "session/update":
-                update = msg.get("params", {}).get("update", {})
+                params = msg.get("params", {}) or {}
+                # 防串包：只收集当前 session 的流式更新
+                if session_id:
+                    sid = (
+                        params.get("sessionId")
+                        or params.get("session_id")
+                        or params.get("id")
+                        or ""
+                    )
+                    if sid and sid != session_id:
+                        continue
+                update = params.get("update", {})
                 su = update.get("sessionUpdate", "")
                 if su == "text_delta":
                     all_text.append(update.get("textDelta", ""))
@@ -447,14 +467,17 @@ class OpenCodeACP:
 
     async def prompt(self, session_id: str, message: str, *, trace_tag: str = "prompt") -> tuple:
         """发送文本消息，返回 (reply_text, reasoning_text)"""
-        msg_id = self._send(
-            "session/prompt",
-            {
-                "sessionId": session_id,
-                "prompt": [{"type": "text", "text": message}],
-            },
-        )
-        collected = await self._collect_prompt_response(msg_id, timeout=180)
+        async with self._rpc_lock:
+            msg_id = self._send(
+                "session/prompt",
+                {
+                    "sessionId": session_id,
+                    "prompt": [{"type": "text", "text": message}],
+                },
+            )
+            collected = await self._collect_prompt_response(
+                msg_id, session_id=session_id, timeout=180
+            )
 
         # 调试：空响应时 dump 信息
         if not collected["text"] and not collected["reasoning"]:
@@ -518,14 +541,17 @@ class OpenCodeACP:
                     "data": b64_data,
                 }
             )
-        msg_id = self._send(
-            "session/prompt",
-            {
-                "sessionId": session_id,
-                "prompt": prompt_parts,
-            },
-        )
-        collected = await self._collect_prompt_response(msg_id, timeout=180)
+        async with self._rpc_lock:
+            msg_id = self._send(
+                "session/prompt",
+                {
+                    "sessionId": session_id,
+                    "prompt": prompt_parts,
+                },
+            )
+            collected = await self._collect_prompt_response(
+                msg_id, session_id=session_id, timeout=180
+            )
         if collected["text"]:
             reply = collected["text"]
         else:

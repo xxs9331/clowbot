@@ -138,13 +138,58 @@ class Handler(
             return json.loads(text)
         except Exception:
             pass
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
+
+        # 容错：从每个 "{" 起尝试 raw_decode，拿到首个可解析对象。
+        # 这样在回复前后夹杂说明文字或其它垃圾片段时，仍能尽量提取决策 JSON。
+        decoder = json.JSONDecoder()
+        for m in re.finditer(r"\{", text):
+            start = m.start()
+            try:
+                obj, _end = decoder.raw_decode(text[start:])
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                return obj
+
+        # 最后兜底：修复常见的“近似 JSON 但 reply 未转义换行导致坏掉”的 unified 回复。
+        # 典型输入：{"tool":"none","payload":{},"reply":"困了...<换行>
+        tool_m = re.search(
+            r"""["']tool["']\s*:\s*["']([^"'\r\n]+)""",
+            text,
+            flags=re.I | re.S,
+        )
+        if not tool_m:
             return {}
-        try:
-            return json.loads(m.group(0))
-        except Exception:
+        tool = (tool_m.group(1) or "").strip()
+        if not tool:
             return {}
+
+        payload: dict = {}
+        payload_m = re.search(
+            r"""["']payload["']\s*:\s*(\{[\s\S]*?\})""",
+            text,
+            flags=re.I | re.S,
+        )
+        if payload_m:
+            try:
+                maybe_payload = json.loads(payload_m.group(1))
+                if isinstance(maybe_payload, dict):
+                    payload = maybe_payload
+            except Exception:
+                payload = {}
+
+        reply = ""
+        reply_m = re.search(
+            r"""["']reply["']\s*:\s*["']([\s\S]*)""",
+            text,
+            flags=re.I | re.S,
+        )
+        if reply_m:
+            reply = reply_m.group(1).strip()
+            # 裁掉末尾可能残留的 JSON 结束符与引号
+            reply = re.sub(r"""["']\s*\}?\s*$""", "", reply).strip()
+
+        return {"tool": tool, "payload": payload, "reply": reply}
 
     async def handle(self, msg: dict):
         text = msg.get("text", "").strip()
