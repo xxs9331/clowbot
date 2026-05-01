@@ -408,7 +408,7 @@ class TodoCoachMixin:
             await self.acp.prompt(self.todo_session_id, prompt, trace_tag="vault_mark_done")
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
-        next_task = self._advance_queue_task(from_user)
+        self._advance_queue_task(from_user)
         progress_text = f"({completed_count}/{total_count})" if total_count > 0 else ""
         done_reply = (reply or "").strip()
         if not done_reply:
@@ -417,11 +417,6 @@ class TodoCoachMixin:
                 if progress_text
                 else f"✅ {current_task}完成。"
             )
-        if next_task and ("下一个：" not in done_reply and "做完了吗" not in done_reply):
-            done_reply = f"{done_reply}下一个：{next_task}，做完了吗？"
-        elif (not next_task) and total_count > 0 and completed_count >= total_count:
-            if "全部完成" not in done_reply:
-                done_reply = f"{done_reply}全部完成了。"
         await self.wx.send_text(done_reply, from_user, context_token)
         return True
 
