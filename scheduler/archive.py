@@ -26,6 +26,7 @@ async def auto_archive_loop(acp: OpenCodeACP, config: dict, handler):
             reply, reasoning = await acp.prompt(
                 handler.session_id,
                 f"读取 {log_path}，按「生活日志」skill 的归档流程将记录分发到生生项目各分类文件并更新任务监控。如果文件不存在或为空，回复「无记录」。只回复一行确认。",
+                trace_tag="scheduler_auto_archive",
             )
             print(f"[Bot] 自动归档: {reply or 'OK'}")
             if reasoning:

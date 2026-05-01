@@ -3,6 +3,7 @@
 import json as _json
 
 from config import _log_reasoning
+from utils.flow_log import log_flow_event
 from utils.wechat_media import download_image
 
 
@@ -14,6 +15,13 @@ class ImageMixin:
         image_items = msg.get("image_items", [])
         if not image_items:
             return
+        log_flow_event(
+            stage="route",
+            route="image_message",
+            user_text=text or "(无附言)",
+            from_user=from_user,
+            session_id=self.session_id,
+        )
         await self.wx.set_typing(
             to_user=from_user, status=1, context_token=context_token
         )
@@ -35,6 +43,8 @@ class ImageMixin:
                 vision_sid,
                 "用简洁的中文描述这张图片的内容，只描述可见内容，不要推理。",
                 img_data,
+                trace_tag="vision_describe",
+                log_model=mm_model,
             )
             image_desc = desc or "无法识别图片内容"
             print(f"[Bot] 👁 图片描述: {image_desc[:100]}")
@@ -52,7 +62,7 @@ class ImageMixin:
                 "3. 只回复一行简短确认，不要输出分析过程\n"
             )
             reply, reasoning = await self.acp.prompt(
-                self.session_id, system_prefix
+                self.session_id, system_prefix, trace_tag="image_write_log"
             )
             if reasoning:
                 _log_reasoning(f"[图片] {image_desc[:50]}", reasoning)

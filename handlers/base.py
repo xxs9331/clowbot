@@ -8,9 +8,12 @@ from acp.opencode_client import OpenCodeACP, build_system_prompt
 from config import _log_reasoning
 from utils.intent import (
     INTENT_QUERY_REMIND,
+    INTENT_QUERY_TODO,
     INTENT_REMIND,
     detect_intent,
 )
+from utils.flow_log import log_flow_event, snapshot_todo_queue
+from utils.route_fast import build_fast_unified_decision
 from wechat.client import ClawBotClient
 
 from .commands import CommandsMixin
@@ -92,6 +95,13 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
 
         local_kind = self._detect_local_view_kind(text)
         if local_kind:
+            log_flow_event(
+                stage="route",
+                route=f"local_view:{local_kind}",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+            )
             await self._local_view_with_optional_llm_fallback(
                 local_kind, from_user, context_token, text
             )
@@ -100,6 +110,59 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
         print(f"[Bot] <<< {text[:50]}")
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
+            intent_early, _ = detect_intent(text)
+            if intent_early == INTENT_QUERY_TODO:
+                log_flow_event(
+                    stage="route",
+                    route="query_todo_intent",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                    extra={"intent": intent_early},
+                )
+                await self._local_view_with_optional_llm_fallback(
+                    "todo", from_user, context_token, text
+                )
+                return
+
+            fast_decision = build_fast_unified_decision(text, from_user, self._todo_queues)
+            if fast_decision:
+                log_flow_event(
+                    stage="route",
+                    route="fast_unified",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                    extra={
+                        "decision": fast_decision,
+                        "queue": snapshot_todo_queue(self._todo_queues, from_user),
+                    },
+                )
+                handled_fast = await self._apply_unified_decision(
+                    fast_decision,
+                    from_user,
+                    context_token,
+                    user_text=text,
+                )
+                log_flow_event(
+                    stage="exit",
+                    route="fast_unified",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                    extra={"handled": handled_fast},
+                )
+                if handled_fast:
+                    return
+
+            log_flow_event(
+                stage="route",
+                route="llm_unified_enter",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"queue": snapshot_todo_queue(self._todo_queues, from_user)},
+            )
             decision = await self._llm_unified_decide(from_user, text)
             handled = await self._apply_unified_decision(
                 decision,
@@ -107,11 +170,30 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                 context_token,
                 user_text=text,
             )
+            log_flow_event(
+                stage="exit",
+                route="llm_unified",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={
+                    "handled": handled,
+                    "decision": decision,
+                },
+            )
             if handled:
                 return
 
             intent, data = detect_intent(text)
             if intent == INTENT_REMIND:
+                log_flow_event(
+                    stage="route",
+                    route="intent_remind",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                    extra={"remind_payload": data},
+                )
                 vault = self.cfg["vault"]
                 system_prefix = build_system_prompt(
                     vault_root=vault["root"],
@@ -124,18 +206,35 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                     f"- [ ] {data}\n"
                     f"如果该节不存在则创建。只回复确认信息。"
                 )
-                reply, _ = await self.acp.prompt(self.session_id, prompt)
+                reply, _ = await self.acp.prompt(
+                    self.session_id, prompt, trace_tag="intent_remind_append"
+                )
                 reply = (reply or "").strip()[:2000]
                 await self.wx.send_text(reply or f"⏰ 已记录提醒：{data}", from_user, context_token)
                 print(f"[Bot] ⏰ 提醒: {data}")
                 self.notify_reminder_refresh()
                 return
             if intent == INTENT_QUERY_REMIND:
+                log_flow_event(
+                    stage="route",
+                    route="query_remind_intent",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                )
                 await self._local_view_with_optional_llm_fallback(
                     "remind", from_user, context_token, text
                 )
                 return
 
+            log_flow_event(
+                stage="route",
+                route="life_fallback",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"intent": intent, "intent_data": data},
+            )
             vault = self.cfg["vault"]
             system_prefix = build_system_prompt(
                 vault_root=vault["root"],
@@ -144,7 +243,9 @@ class Handler(LocalViewMixin, TodoMixin, ImageMixin, CommandsMixin):
                 task_dir=vault.get("task_dir", ""),
             )
             reply, reasoning = await self.acp.prompt(
-                self.session_id, f"{system_prefix}\n用户发来：「{text}」"
+                self.session_id,
+                f"{system_prefix}\n用户发来：「{text}」",
+                trace_tag="life_fallback",
             )
             if reasoning:
                 print(f"[Bot] 🧠 {reasoning[:200]}")

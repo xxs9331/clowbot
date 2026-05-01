@@ -4,11 +4,19 @@ from contextlib import suppress
 
 from acp.opencode_client import build_system_prompt
 from config import _log_reasoning
+from utils.flow_log import log_flow_event
 
 
 class CommandsMixin:
     async def _cmd(self, text: str, to: str, context_token: str = ""):
         cmd = text.lower().split()[0]
+        log_flow_event(
+            stage="route",
+            route=f"slash:{cmd}",
+            user_text=text,
+            from_user=to,
+            session_id=self.session_id,
+        )
         if cmd in ["/help", "/帮助"]:
             await self.wx.send_text(
                 "🤖 生生生活日志助手\n\n"
@@ -57,7 +65,9 @@ class CommandsMixin:
                         f"用户要设置提醒：「{arg}」\n"
                         f"请在日志的「## ⏰ 提醒」节追加。只回复确认信息。"
                     )
-                    reply, _ = await self.acp.prompt(self.session_id, prompt)
+                    reply, _ = await self.acp.prompt(
+                        self.session_id, prompt, trace_tag="cmd_remind_append"
+                    )
                     await self.wx.send_text((reply or "").strip() or f"⏰ 已记录提醒：{arg}", to, context_token)
                     self.notify_reminder_refresh()
                 except Exception as e:
@@ -122,6 +132,7 @@ class CommandsMixin:
                     reply, reasoning = await self.acp.prompt(
                         self.session_id,
                         f"只回复数据，不要输出分析过程。读取 {vault['root']}/{vault['daily_log_dir']} 下最近7天的文件，提取'{cat}'分类的记录，总结趋势。",
+                        trace_tag="cmd_stat_7d",
                     )
                     if reasoning:
                         print(f"[Bot] 🧠 {reasoning[:200]}")

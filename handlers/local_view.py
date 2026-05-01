@@ -16,8 +16,9 @@ class LocalViewMixin:
 
     @staticmethod
     def _extract_section(content: str, emoji: str, title: str) -> str:
-        pattern = rf"(##\s*(?:\d+(?:\.\d+)?\s+)?{re.escape(emoji)}\s*{re.escape(title)}.*?)(?=##|\Z)"
-        match = re.search(pattern, content, re.DOTALL)
+        # 只在「二级标题」处结束：行首为 ## + 空格。若用 (?=##|\Z)，会在 ### 处误匹配（### 以 ## 开头）。
+        pattern = rf"(##\s*(?:\d+(?:\.\d+)?\s+)?{re.escape(emoji)}\s*{re.escape(title)}.*?)(?=^## |\Z)"
+        match = re.search(pattern, content, re.DOTALL | re.MULTILINE)
         return match.group(1).strip() if match else ""
 
     def _log_local_view_obs(
@@ -190,7 +191,9 @@ class LocalViewMixin:
                 f"用户原话：「{user_text}」\n"
                 "请用工具读取该文件（若存在）并给出用户需要的内容；若无法读取则说明原因。"
             )
-            reply, reasoning = await self.acp.prompt(self.session_id, prompt)
+            reply, reasoning = await self.acp.prompt(
+                self.session_id, prompt, trace_tag="local_view_llm_fallback"
+            )
             if reasoning:
                 print(f"[Bot] 🧠 {reasoning[:200]}")
                 _log_reasoning(f"[local_view_fallback:{kind}] {user_text[:80]}", reasoning)
