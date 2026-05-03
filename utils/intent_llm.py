@@ -48,7 +48,7 @@ def _build_prime_prompt() -> str:
         "只输出一个紧凑 JSON 对象，不要任何解释、不要 markdown、不要代码块。\n"
         "\n"
         f"intent ∈ {{{' | '.join(INTENT_LABELS)}}}\n"
-        "slots 字段：text / hhmm / template_name / category（按需填，缺省可省略）\n"
+        "slots 字段：text / hhmm / template_name / category / event_date（按需填，缺省可省略）\n"
         "confidence ∈ [0,1]，对自己判断的把握；倒装、纠错、模糊句把信心降低。\n"
         "\n"
         "判定要点：\n"
@@ -59,6 +59,8 @@ def _build_prime_prompt() -> str:
         "5) 看待办/今日待办 → query_todo；看提醒 → query_remind；"
         "查/找「最近几条记忆或记录」等只读浏览 → none（confidence 可 0.35～0.55：与写记录 record_add 区分，入口会读今日日记）\n"
         "6) 不确定 → none，confidence ≤ 0.4\n"
+        "7) 续写/代指句（如「她也改签了」「同上」「跟刚才一样」）若无明确日期，"
+        "intent 仍可为 record_add，但 confidence 应 ≤0.55，让上层 unified 结合上下文决定 event_date\n"
         "\n"
         "重要约束：\n"
         "- template_name 不允许是泛词（如\"模板\"\"待办模板\"\"流程模板\"），否则置空并降低 confidence\n"
@@ -78,22 +80,33 @@ def _build_prime_prompt() -> str:
     )
 
 
-def _build_turn_prompt(text: str, queue_state: dict | None) -> str:
+def _build_turn_prompt(
+    text: str,
+    queue_state: dict | None,
+    memory_context: str | None = None,
+) -> str:
     """分类回合短 prompt：避免每轮重复注入长规则。"""
     queue = queue_state or {"active": False}
+    mem = (memory_context or "").strip()
+    mem_block = f"\n{mem}\n" if mem else ""
     return (
         "按你已加载的分类规则执行本轮判断。\n"
         "仅输出紧凑 JSON：{\"intent\":\"...\",\"slots\":{},\"confidence\":0.0}\n"
         "\n"
         f"队列状态: {json.dumps(queue, ensure_ascii=False)}\n"
+        f"{mem_block}"
         f"用户消息: {text}\n"
         "JSON:"
     )
 
 
-def _build_prompt(text: str, queue_state: dict | None) -> str:
+def _build_prompt(
+    text: str,
+    queue_state: dict | None,
+    memory_context: str | None = None,
+) -> str:
     """兼容旧测试：返回 prime+turn 的完整提示。"""
-    return f"{_build_prime_prompt()}\n\n{_build_turn_prompt(text, queue_state)}"
+    return f"{_build_prime_prompt()}\n\n{_build_turn_prompt(text, queue_state, memory_context)}"
 
 
 def _extract_json(reply: str) -> dict | None:
@@ -157,6 +170,7 @@ async def classify_intent(
     model: str | None,
     text: str,
     queue_state: dict | None = None,
+    memory_context: str | None = None,
     timeout: float = 12.0,
     from_user: str = "",
 ) -> dict | None:
@@ -183,7 +197,7 @@ async def classify_intent(
         )
         return None
 
-    prompt = _build_turn_prompt(text, queue_state)
+    prompt = _build_turn_prompt(text, queue_state, memory_context)
     try:
         reply, _ = await asyncio.wait_for(
             acp.prompt(sid, prompt, trace_tag="intent_classify"),

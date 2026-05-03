@@ -67,6 +67,9 @@ def _record_add_decision(slots: dict) -> dict | None:
     cat = (slots.get("category") or "").strip()
     if cat:
         payload["category"] = cat
+    ed = (slots.get("event_date") or "").strip()
+    if ed:
+        payload["event_date"] = ed
     return {"tool": TOOL_RECORD_ADD, "payload": payload, "reply": ""}
 
 

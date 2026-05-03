@@ -9,6 +9,7 @@ import pytest
 from utils.intent_llm import (
     INTENT_LABELS,
     _build_prompt,
+    _build_turn_prompt,
     _extract_json,
     _normalize,
     classify_intent,
@@ -79,6 +80,13 @@ def test_build_prompt_contains_user_message_and_examples():
     assert "intent" in p
     assert "template_name" in p
     assert "泛词" in p
+
+
+def test_build_turn_prompt_includes_memory_context():
+    mem = "近期生活记录（结构化摘要"
+    p = _build_turn_prompt("她也改签了", {"active": False}, memory_context=mem)
+    assert mem in p
+    assert "她也改签了" in p
 
 
 # ─── classify_intent: 用 stub acp 验证三条主路径 ───
@@ -159,3 +167,18 @@ def test_classify_intent_tolerates_dirty_output(raw_reply, expect_intent):
     acp = _StubACP(raw_reply)
     out = _run(classify_intent(acp, model=None, text="任意"))
     assert out is not None and out["intent"] == expect_intent
+
+
+def test_classify_intent_passes_memory_context_into_prompt():
+    acp = _StubACP('{"intent":"record_add","slots":{"text":"x"},"confidence":0.3}')
+    mem = "近期生活记录（结构化摘要，供续写句对齐日期）"
+    _run(
+        classify_intent(
+            acp,
+            model=None,
+            text="她也改签了",
+            memory_context=mem,
+        )
+    )
+    classify_calls = [x for x in acp.prompt_calls if x["trace_tag"] == "intent_classify"]
+    assert classify_calls and mem in classify_calls[-1]["msg"]

@@ -138,6 +138,15 @@ def log_acp_turn(
             )
         except Exception:
             lines.append(f"  collector_update_counters: {str(m.get('update_counters'))[:500]}")
+    # 流式 vs 最终 result 合并观测（见 OpenCodeACP._merge_stream_and_result_reply）
+    if m.get("stream_reply_len") is not None:
+        lines.append(f"  stream_reply_len: {m.get('stream_reply_len')}")
+    if m.get("result_reply_len") is not None:
+        lines.append(f"  result_reply_len: {m.get('result_reply_len')}")
+    if m.get("reply_selected_source"):
+        lines.append(f"  reply_selected_source: {m.get('reply_selected_source')}")
+    if m.get("reply_merge_conflict"):
+        lines.append(f"  reply_merge_conflict: {m.get('reply_merge_conflict')}")
     if reasoning:
         lines.append(f"  reasoning_preview:\n{_snip(reasoning, PREVIEW_REASONING)}")
     else:

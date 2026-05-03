@@ -7,7 +7,8 @@ opencode:
   cwd: "D:/Lenovo/Documents/世界树/世界树"
   port: 4096
   hostname: "127.0.0.1"
-  max_tokens: 500
+  # 单次回复 maxTokens（OpenCode session/prompt）；需要更长输出时可调大
+  max_tokens: 4096
   model: "opencode-go/deepseek-v4-flash"        # 默认文本模型
   multimodal_model: "opencode-go/qwen3.6-plus"  # 多模态（图片）模型
 
@@ -16,6 +17,12 @@ opencode:
   # intent_threshold_high: 0.8
   # intent_threshold_mid: 0.5
   structured_retry_count: 3
+
+  # 流式 agent_message_chunk 与最终 JSON-RPC 文本合并，避免半句回复（建议 true）
+  reply_merge_enabled: true
+  # false：禁止 record_add 走意图高分短路，一律交给 unified（续写/代词更稳）
+  # true：允许短路，但对极短句/代词句仍会阻止短路
+  record_high_conf_short_circuit: false
 
 # ─── Vault 路径 ───
 vault:

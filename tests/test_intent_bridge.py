@@ -118,6 +118,24 @@ def test_record_add_without_category():
     assert d["payload"] == {"text": "快递取了"}
 
 
+def test_record_add_with_event_date():
+    d = intent_to_decision(
+        {
+            "intent": "record_add",
+            "slots": {
+                "text": "她也改签了",
+                "category": "事务",
+                "event_date": "2026-05-02",
+            },
+            "confidence": 0.88,
+        }
+    )
+    assert d["tool"] == TOOL_RECORD_ADD
+    assert d["payload"]["text"] == "她也改签了"
+    assert d["payload"]["category"] == "事务"
+    assert d["payload"]["event_date"] == "2026-05-02"
+
+
 def test_query_intents_yield_to_unified():
     assert intent_to_decision({"intent": "query_todo", "slots": {}, "confidence": 0.9}) is None
     assert intent_to_decision({"intent": "query_remind", "slots": {}, "confidence": 0.9}) is None

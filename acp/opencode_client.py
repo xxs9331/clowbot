@@ -32,7 +32,9 @@ class OpenCodeACP:
         port: int = 0,
         hostname: str = "127.0.0.1",
         model: str = DEFAULT_MODEL,
-        max_tokens: int = 500,
+        max_tokens: int = 4096,
+        *,
+        reply_merge_enabled: bool = True,
     ):
         self.cwd = cwd
         self.port = port
@@ -40,6 +42,7 @@ class OpenCodeACP:
         self.model = model
         self.multimodal_model = MULTIMODAL_MODEL
         self.max_tokens = int(max_tokens) if max_tokens else 0
+        self.reply_merge_enabled = bool(reply_merge_enabled)
         self._proc: Optional[subprocess.Popen] = None
         self._msg_id = 0
         self._reader_thread: Optional[threading.Thread] = None
@@ -291,6 +294,45 @@ class OpenCodeACP:
     # ─── 文本提取 ───
 
     @staticmethod
+    def _merge_stream_and_result_reply(
+        stream_text: str,
+        final_rpc_msg: dict | None,
+    ) -> tuple[str, dict]:
+        """合并流式 agent_message_chunk 与最终 JSON-RPC 中的文本，避免 matched_final_response 先到导致半句。
+
+        返回 (reply, merge_meta)；merge_meta 供 flow 日志观测。
+        """
+        s = (stream_text or "").strip()
+        r = OpenCodeACP._extract_text(final_rpc_msg or {}).strip()
+        meta: dict = {
+            "stream_reply_len": len(s),
+            "result_reply_len": len(r),
+            "reply_merge_conflict": False,
+            "reply_selected_source": "",
+        }
+        if not s and not r:
+            meta["reply_selected_source"] = "empty"
+            return "", meta
+        if not s:
+            meta["reply_selected_source"] = "result"
+            return r, meta
+        if not r:
+            meta["reply_selected_source"] = "stream"
+            return s, meta
+        if s == r:
+            meta["reply_selected_source"] = "stream"
+            return s, meta
+        if r.startswith(s):
+            meta["reply_selected_source"] = "merged"
+            return r, meta
+        if s.startswith(r):
+            meta["reply_selected_source"] = "merged"
+            return s, meta
+        meta["reply_merge_conflict"] = True
+        meta["reply_selected_source"] = "result"
+        return r, meta
+
+    @staticmethod
     def _extract_text(response: dict) -> str:
         """从 ACP 响应中提取文本内容"""
         result = response.get("result", {})
@@ -340,6 +382,36 @@ class OpenCodeACP:
             if isinstance(obj, dict):
                 return obj
         return None
+
+    @staticmethod
+    def _project_obj_to_schema_properties(obj: dict | None, schema: dict) -> dict | None:
+        """schema 含 properties 且 additionalProperties=false 时，先丢掉未声明的键再校验。
+
+        避免模型在仅允许 tool+payload 的回合误塞 reply、message 等导致校验失败、连续重试仍失败。
+        """
+        if not isinstance(obj, dict) or not isinstance(schema, dict):
+            return obj
+        props = schema.get("properties")
+        if not isinstance(props, dict) or not props:
+            return obj
+        if schema.get("additionalProperties") is False:
+            return {k: v for k, v in obj.items() if k in props}
+        return obj
+
+    @staticmethod
+    def _take_structured_reply_spill(raw_obj: dict | None, schema: dict) -> str:
+        """若原始 JSON 含 reply 且 schema 不允许该键，保留文案供上游复用，避免再打一枪 unified_reply。"""
+        if not isinstance(raw_obj, dict) or not isinstance(schema, dict):
+            return ""
+        if schema.get("additionalProperties") is not False:
+            return ""
+        props = schema.get("properties") or {}
+        if "reply" in props:
+            return ""
+        r = raw_obj.get("reply")
+        if r is None:
+            return ""
+        return str(r).strip()
 
     @classmethod
     def _validate_schema_obj(cls, obj: dict, schema: dict) -> bool:
@@ -589,11 +661,25 @@ class OpenCodeACP:
                     f"[ACP DEBUG] result sample: {json.dumps(collected['result'], ensure_ascii=False)[:500]}"
                 )
 
-        # 优先用流式文本，否则用结果提取
-        if collected["text"]:
-            reply = collected["text"]
+        if self.reply_merge_enabled:
+            reply, merge_meta = self._merge_stream_and_result_reply(
+                collected["text"], collected.get("result")
+            )
         else:
-            reply = self._extract_text(collected["result"])
+            if collected["text"]:
+                reply = collected["text"]
+            else:
+                reply = self._extract_text(collected["result"])
+            merge_meta = {
+                "stream_reply_len": len((collected["text"] or "").strip()),
+                "result_reply_len": len(self._extract_text(collected.get("result") or {})),
+                "reply_merge_conflict": False,
+                "reply_selected_source": (
+                    "stream"
+                    if (collected["text"] or "").strip()
+                    else ("result" if reply else "empty")
+                ),
+            }
         reasoning = collected["reasoning"]
         log_acp_turn(
             trace=trace_tag,
@@ -609,9 +695,13 @@ class OpenCodeACP:
                 "saw_final_response": collected.get("saw_final_response"),
                 "break_reason": collected.get("break_reason"),
                 "update_counters": collected.get("update_counters"),
+                **merge_meta,
             },
         )
         return reply, reasoning
+
+    # 仅 prompt_structured → dispatcher 使用：校验通过后附带回用的用户可见 reply，随后由 dispatcher pop 掉
+    STRUCTURED_DECISION_SPILL_REPLY_KEY = "_spill_reply"
 
     async def prompt_structured(
         self,
@@ -625,6 +715,8 @@ class OpenCodeACP:
         """结构化输出：文本协议 + 本地 schema 校验 + retry。
 
         不依赖 provider 原生 function calling，兼容 openai-compatible 网关。
+        若模型在 JSON 里多写了 reply 且被 schema 剥离，成功时会把原文放在键
+        STRUCTURED_DECISION_SPILL_REPLY_KEY 上一并返回，供 dispatcher 在 tool=none 时复用，免再打 unified_reply。
         """
         schema_text = json.dumps(json_schema, ensure_ascii=False)
         structured_prompt = (
@@ -641,12 +733,20 @@ class OpenCodeACP:
                 structured_prompt,
                 trace_tag=f"{trace_tag}#{i + 1}",
             )
-            obj = self._extract_first_json_object(reply or "")
+            raw_obj = self._extract_first_json_object(reply or "")
+            spill = self._take_structured_reply_spill(raw_obj, json_schema)
+            obj = self._project_obj_to_schema_properties(raw_obj, json_schema)
             if isinstance(obj, dict) and self._validate_schema_obj(obj, json_schema):
+                if spill:
+                    return {**obj, self.STRUCTURED_DECISION_SPILL_REPLY_KEY: spill}
                 return obj
             # 兜底：部分模型把 JSON 放在 reasoning 通道
-            obj2 = self._extract_first_json_object(reasoning or "")
+            raw_obj2 = self._extract_first_json_object(reasoning or "")
+            spill2 = self._take_structured_reply_spill(raw_obj2, json_schema)
+            obj2 = self._project_obj_to_schema_properties(raw_obj2, json_schema)
             if isinstance(obj2, dict) and self._validate_schema_obj(obj2, json_schema):
+                if spill2:
+                    return {**obj2, self.STRUCTURED_DECISION_SPILL_REPLY_KEY: spill2}
                 return obj2
         return None
 
@@ -684,10 +784,25 @@ class OpenCodeACP:
             collected = await self._collect_prompt_response(
                 msg_id, session_id=session_id, timeout=180
             )
-        if collected["text"]:
-            reply = collected["text"]
+        if self.reply_merge_enabled:
+            reply, merge_meta = self._merge_stream_and_result_reply(
+                collected["text"], collected.get("result")
+            )
         else:
-            reply = self._extract_text(collected["result"])
+            if collected["text"]:
+                reply = collected["text"]
+            else:
+                reply = self._extract_text(collected["result"])
+            merge_meta = {
+                "stream_reply_len": len((collected["text"] or "").strip()),
+                "result_reply_len": len(self._extract_text(collected.get("result") or {})),
+                "reply_merge_conflict": False,
+                "reply_selected_source": (
+                    "stream"
+                    if (collected["text"] or "").strip()
+                    else ("result" if reply else "empty")
+                ),
+            }
         reasoning = collected["reasoning"]
         # 多模态不把 base64 打进 flow 日志
         prompt_for_log = text + (f"\n[image bytes={len(image_bytes)} mime={mime_type}]" if image_bytes else "")
@@ -705,6 +820,7 @@ class OpenCodeACP:
                 "saw_final_response": collected.get("saw_final_response"),
                 "break_reason": collected.get("break_reason"),
                 "update_counters": collected.get("update_counters"),
+                **merge_meta,
             },
         )
         return reply, reasoning

@@ -34,6 +34,29 @@ class _FakeACP:
         return "", ""
 
 
+class _FakeACPCombinedFailsThenDecisionOnly:
+    """第一次 prompt_structured（合并路径）失败，第二次（仅决策）成功，再走 unified_reply。"""
+
+    def __init__(self, *, raise_on_reply: bool = False):
+        self._structured_attempt = 0
+        self.prompt_calls: list[str] = []
+        self.raise_on_reply = raise_on_reply
+
+    async def prompt_structured(self, *args, **kwargs):
+        self._structured_attempt += 1
+        if self._structured_attempt == 1:
+            return None
+        return {"tool": TOOL_DECISION_NONE, "payload": {}}
+
+    async def prompt(self, sid, msg, *, trace_tag="x"):
+        self.prompt_calls.append(trace_tag)
+        if self.raise_on_reply and trace_tag == "unified_reply":
+            raise RuntimeError("reply boom")
+        if trace_tag == "unified_reply":
+            return "仅决策后补写", ""
+        return "", ""
+
+
 class _FakeDispatcher(DispatcherMixin):
     def __init__(self, acp):
         self.acp = acp
@@ -90,16 +113,49 @@ def test_prompt_structured_retry_until_valid():
 
 
 def test_unified_structured_success_then_generate_reply():
+    """合并路径一次返回 tool+payload+reply，不再打 unified_reply。"""
     acp = _FakeACP(
-        structured={"tool": TOOL_DECISION_NONE, "payload": {}},
-        prompt_replies=["好的，去睡吧"],
+        structured={
+            "tool": TOOL_DECISION_NONE,
+            "payload": {},
+            "reply": "好的，去睡吧",
+        },
     )
     h = _FakeDispatcher(acp)
     out = _run(h._llm_unified_decide("u1", "好困"))
     assert out["tool"] == TOOL_DECISION_NONE
     assert out["payload"] == {}
     assert out["reply"] == "好的，去睡吧"
+    assert "unified_reply" not in acp.prompt_calls
+
+
+def test_unified_combined_fails_then_decision_only_and_unified_reply():
+    acp = _FakeACPCombinedFailsThenDecisionOnly()
+    h = _FakeDispatcher(acp)
+    out = _run(h._llm_unified_decide("u1", "你好"))
+    assert out["tool"] == TOOL_DECISION_NONE
+    assert out["payload"] == {}
+    assert out["reply"] == "仅决策后补写"
+    assert acp._structured_attempt == 2
     assert "unified_reply" in acp.prompt_calls
+
+
+def test_unified_combined_includes_reply_skips_second_llm():
+    """合并路径一次返回含 reply 的 JSON，不再打 unified_reply。"""
+    acp = OpenCodeACP()
+    trace_tags: list[str] = []
+
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+        trace_tags.append(trace_tag)
+        return '{"tool":"none","payload":{},"reply":"只要这一枪"}', ""
+
+    acp.prompt = _stub_prompt  # type: ignore[method-assign]
+    h = _FakeDispatcher(acp)
+    h.acp = acp
+    out = _run(h._llm_unified_decide("u1", "嗨"))
+    assert out["reply"] == "只要这一枪"
+    assert "unified_reply" not in trace_tags
+    assert any("unified_decide_combined" in t for t in trace_tags)
 
 
 def test_unified_structured_fail_fallback_to_text_json():

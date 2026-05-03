@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import uuid
 
 from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.intent import (
@@ -65,6 +66,82 @@ class Handler(
         self._pending_reorders: dict[str, list[str]] = {}
         self._local_view_last: dict[tuple[str, str], tuple[float, str]] = {}
         self._local_view_debounce_sec: float = 2.0
+        # 每用户最近若干条结构化决策（供 unified / 意图分类续写对齐）
+        self._user_route_memory: dict[str, list[dict]] = {}
+
+    def _remember_unified_decision(self, from_user: str, decision: dict) -> None:
+        """成功执行 tool 后写入短期记忆（仅关键字段，控制体积）。"""
+        if not from_user:
+            return
+        tool = (decision.get("tool") or "").strip()
+        keys_by_tool = {
+            "record.add": ("text", "category", "event_date"),
+            "remind.add": ("text", "hhmm", "event_date"),
+            "todo.merge_new_items": ("tasks",),
+        }
+        keys = keys_by_tool.get(tool)
+        if not keys:
+            return
+        payload = decision.get("payload")
+        if not isinstance(payload, dict):
+            return
+        slim = {k: payload.get(k) for k in keys if k in payload}
+        entry = {"tool": tool, "payload": slim}
+        lst = self._user_route_memory.setdefault(from_user, [])
+        lst.append(entry)
+        while len(lst) > 5:
+            lst.pop(0)
+
+    def _extra_unified_context(self, user_id: str) -> str:
+        """拼到 unified prompt 的上下文块（JSON 行，便于模型解析）。"""
+        items = self._user_route_memory.get(user_id, [])
+        if not items:
+            return ""
+        tail = items[-5:]
+        return (
+            "- recent_decisions_json: "
+            + json.dumps(tail, ensure_ascii=False)
+            + "\n（续写/代指时请继承其中的 event_date 与主题，除非用户本句明确给出新日期。）\n"
+        )
+
+    def _intent_classifier_memory_block(self, user_id: str) -> str:
+        """意图小模型用的短记忆（只取最近生活记录，避免 prompt 过长）。"""
+        items = [
+            x
+            for x in self._user_route_memory.get(user_id, [])
+            if x.get("tool") == "record.add"
+        ][-2:]
+        if not items:
+            return ""
+        lines = ["近期生活记录（结构化摘要，供续写句对齐日期）:"]
+        for it in items:
+            p = it.get("payload") or {}
+            ed = p.get("event_date") or ""
+            tx = (p.get("text") or "")[:80]
+            lines.append(f"- event_date={ed or '(未显式)'} text={tx!r}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _block_intent_short_circuit(
+        intent_obj: dict, text: str, oc_cfg: dict
+    ) -> bool:
+        """True = 阻止意图高分短路，交给 unified（续写/缺日期等）。"""
+        intent = (intent_obj.get("intent") or "").strip().lower()
+        allow_record = bool(oc_cfg.get("record_high_conf_short_circuit", False))
+        if intent == "record_add" and not allow_record:
+            return True
+        if intent != "record_add":
+            return False
+        slots = intent_obj.get("slots") if isinstance(intent_obj.get("slots"), dict) else {}
+        if (slots.get("event_date") or "").strip():
+            return False
+        t = text.strip()
+        if len(t) <= 16:
+            return True
+        hints = ("她", "他", "它", "这", "那", "也", "同样", "跟", "还", "又", "刚才", "之前")
+        if len(t) < 40 and any(h in t for h in hints):
+            return True
+        return False
 
     async def init_session(self):
         """初始化 ACP sessions（按域分流，减少跨域上下文污染）。"""
@@ -224,6 +301,233 @@ class Handler(
 
         return {"tool": tool, "payload": payload, "reply": reply}
 
+    async def _run_chat_routing_pipeline(
+        self, text: str, from_user: str, context_token: str
+    ) -> None:
+        """规则守卫 → 快通道 → 意图分类 → 统一决策 → 安全兜底。"""
+        msg_trace = uuid.uuid4().hex[:12]
+        log_flow_event(
+            stage="route",
+            route="chat_pipeline",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={"trace": msg_trace},
+        )
+
+        intent_early, _ = detect_intent(text)
+        if intent_early == INTENT_QUERY_TODO:
+            log_flow_event(
+                stage="route",
+                route="query_todo_intent",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"intent": intent_early, "trace": msg_trace},
+            )
+            await self._local_view_with_optional_llm_fallback(
+                "todo", from_user, context_token, text
+            )
+            return
+
+        fast_decision = build_fast_unified_decision(text, from_user, self._todo_queues)
+        if fast_decision:
+            log_flow_event(
+                stage="route",
+                route="fast_unified",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={
+                    "trace": msg_trace,
+                    "decision": fast_decision,
+                    "queue": snapshot_todo_queue(self._todo_queues, from_user),
+                },
+            )
+            handled_fast = await self._apply_unified_decision(
+                fast_decision,
+                from_user,
+                context_token,
+                user_text=text,
+            )
+            log_flow_event(
+                stage="exit",
+                route="fast_unified",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"trace": msg_trace, "handled": handled_fast},
+            )
+            if handled_fast:
+                return
+
+        # ─── 小模型意图分类兜底（只在规则/fast 都未命中时触发）───
+        oc_cfg = self.cfg.get("opencode", {}) or {}
+        high_th = float(oc_cfg.get("intent_threshold_high", 0.8) or 0.8)
+        mid_th = float(oc_cfg.get("intent_threshold_mid", 0.5) or 0.5)
+        intent_model = oc_cfg.get("intent_model") or None
+        queue_state = snapshot_todo_queue(self._todo_queues, from_user)
+        mem_block = self._intent_classifier_memory_block(from_user)
+        intent_obj = await classify_intent(
+            self.acp,
+            model=intent_model,
+            text=text,
+            queue_state=queue_state,
+            memory_context=mem_block or None,
+            from_user=from_user,
+        )
+        intent_hint = None
+        if intent_obj:
+            conf = float(intent_obj.get("confidence", 0.0))
+            log_flow_event(
+                stage="route",
+                route="intent_llm",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={
+                    "trace": msg_trace,
+                    "intent": intent_obj.get("intent"),
+                    "slots": intent_obj.get("slots", {}),
+                    "confidence": conf,
+                    "queue": queue_state,
+                },
+            )
+            if conf >= high_th:
+                decision = intent_to_decision(intent_obj)
+                if decision and self._block_intent_short_circuit(intent_obj, text, oc_cfg):
+                    log_flow_event(
+                        stage="route",
+                        route="intent_high_deferred",
+                        user_text=text,
+                        from_user=from_user,
+                        session_id=self.session_id,
+                        extra={
+                            "trace": msg_trace,
+                            "intent": intent_obj.get("intent"),
+                            "confidence": conf,
+                        },
+                    )
+                    decision = None
+                if decision:
+                    handled_sm = await self._apply_unified_decision(
+                        decision,
+                        from_user,
+                        context_token,
+                        user_text=text,
+                    )
+                    log_flow_event(
+                        stage="exit",
+                        route="intent_llm",
+                        user_text=text,
+                        from_user=from_user,
+                        session_id=self.session_id,
+                        extra={
+                            "trace": msg_trace,
+                            "handled": handled_sm,
+                            "intent_source": "small_model",
+                            "intent_confidence": conf,
+                            "intent_slots": intent_obj.get("slots", {}),
+                            "decision": decision,
+                        },
+                    )
+                    if handled_sm:
+                        return
+            if conf >= mid_th:
+                intent_hint = intent_obj
+
+        log_flow_event(
+            stage="route",
+            route="llm_unified_enter",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={"trace": msg_trace, "queue": queue_state, "intent_hint": intent_hint},
+        )
+        decision = await self._llm_unified_decide(
+            from_user, text, intent_hint=intent_hint
+        )
+        handled = await self._apply_unified_decision(
+            decision,
+            from_user,
+            context_token,
+            user_text=text,
+        )
+        log_flow_event(
+            stage="exit",
+            route="llm_unified",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={
+                "trace": msg_trace,
+                "handled": handled,
+                "decision": decision,
+                "intent_source": "unified",
+                "intent_hint": intent_hint,
+            },
+        )
+        if handled:
+            return
+
+        intent, data = detect_intent(text)
+        if intent == INTENT_REMIND:
+            log_flow_event(
+                stage="route",
+                route="intent_remind",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"trace": msg_trace, "remind_payload": data},
+            )
+            hhmm, _, remind_text = data.partition("：")
+            remind_text = remind_text.strip() or data
+            hhmm = hhmm.strip()
+            decision = {
+                "tool": "remind.add",
+                "payload": {"text": remind_text, "hhmm": hhmm},
+                "reply": "",
+            }
+            await self._apply_unified_decision(
+                decision, from_user, context_token, user_text=text
+            )
+            print(f"[Bot] ⏰ 提醒: {data}")
+            return
+        if intent == INTENT_QUERY_REMIND:
+            log_flow_event(
+                stage="route",
+                route="query_remind_intent",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={"trace": msg_trace},
+            )
+            await self._local_view_with_optional_llm_fallback(
+                "remind", from_user, context_token, text
+            )
+            return
+
+        log_flow_event(
+            stage="route",
+            route="safe_fallback",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={
+                "trace": msg_trace,
+                "intent": intent,
+                "intent_data": data,
+                "intent_source": "safe_fallback",
+                "intent_hint": intent_hint,
+            },
+        )
+        await self.wx.send_text(
+            "我没看懂这条要怎么记。要我把它当作生活记录写进今日日记吗？回「记一下」即可。",
+            from_user,
+            context_token,
+        )
+        print(f"[Bot] >>> safe_fallback: {text[:60]}")
+
     async def handle(self, msg: dict):
         text = msg.get("text", "").strip()
         msg_type = msg.get("type", "text")
@@ -265,202 +569,7 @@ class Handler(
         print(f"[Bot] <<< {text[:50]}")
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
-            intent_early, _ = detect_intent(text)
-            if intent_early == INTENT_QUERY_TODO:
-                log_flow_event(
-                    stage="route",
-                    route="query_todo_intent",
-                    user_text=text,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                    extra={"intent": intent_early},
-                )
-                await self._local_view_with_optional_llm_fallback(
-                    "todo", from_user, context_token, text
-                )
-                return
-
-            fast_decision = build_fast_unified_decision(text, from_user, self._todo_queues)
-            if fast_decision:
-                log_flow_event(
-                    stage="route",
-                    route="fast_unified",
-                    user_text=text,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                    extra={
-                        "decision": fast_decision,
-                        "queue": snapshot_todo_queue(self._todo_queues, from_user),
-                    },
-                )
-                handled_fast = await self._apply_unified_decision(
-                    fast_decision,
-                    from_user,
-                    context_token,
-                    user_text=text,
-                )
-                log_flow_event(
-                    stage="exit",
-                    route="fast_unified",
-                    user_text=text,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                    extra={"handled": handled_fast},
-                )
-                if handled_fast:
-                    return
-
-            # ─── 小模型意图分类兜底（只在规则/fast 都未命中时触发）───
-            oc_cfg = self.cfg.get("opencode", {}) or {}
-            high_th = float(oc_cfg.get("intent_threshold_high", 0.8) or 0.8)
-            mid_th = float(oc_cfg.get("intent_threshold_mid", 0.5) or 0.5)
-            intent_model = oc_cfg.get("intent_model") or None
-            queue_state = snapshot_todo_queue(self._todo_queues, from_user)
-            intent_obj = await classify_intent(
-                self.acp,
-                model=intent_model,
-                text=text,
-                queue_state=queue_state,
-                from_user=from_user,
-            )
-            intent_hint = None
-            if intent_obj:
-                conf = float(intent_obj.get("confidence", 0.0))
-                log_flow_event(
-                    stage="route",
-                    route="intent_llm",
-                    user_text=text,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                    extra={
-                        "intent": intent_obj.get("intent"),
-                        "slots": intent_obj.get("slots", {}),
-                        "confidence": conf,
-                        "queue": queue_state,
-                    },
-                )
-                if conf >= high_th:
-                    decision = intent_to_decision(intent_obj)
-                    if decision:
-                        handled_sm = await self._apply_unified_decision(
-                            decision,
-                            from_user,
-                            context_token,
-                            user_text=text,
-                        )
-                        log_flow_event(
-                            stage="exit",
-                            route="intent_llm",
-                            user_text=text,
-                            from_user=from_user,
-                            session_id=self.session_id,
-                            extra={
-                                "handled": handled_sm,
-                                "intent_source": "small_model",
-                                "intent_confidence": conf,
-                                "intent_slots": intent_obj.get("slots", {}),
-                                "decision": decision,
-                            },
-                        )
-                        if handled_sm:
-                            return
-                if conf >= mid_th:
-                    intent_hint = intent_obj
-
-            log_flow_event(
-                stage="route",
-                route="llm_unified_enter",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={
-                    "queue": queue_state,
-                    "intent_hint": intent_hint,
-                },
-            )
-            decision = await self._llm_unified_decide(
-                from_user, text, intent_hint=intent_hint
-            )
-            handled = await self._apply_unified_decision(
-                decision,
-                from_user,
-                context_token,
-                user_text=text,
-            )
-            log_flow_event(
-                stage="exit",
-                route="llm_unified",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={
-                    "handled": handled,
-                    "decision": decision,
-                    "intent_source": "unified",
-                    "intent_hint": intent_hint,
-                },
-            )
-            if handled:
-                return
-
-            intent, data = detect_intent(text)
-            if intent == INTENT_REMIND:
-                log_flow_event(
-                    stage="route",
-                    route="intent_remind",
-                    user_text=text,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                    extra={"remind_payload": data},
-                )
-                # data 形如 "07:30：上班" 或 "上班"（无时间则缺 hhmm，由 remind.add 兜底要时间）
-                hhmm, _, remind_text = data.partition("：")
-                remind_text = remind_text.strip() or data
-                hhmm = hhmm.strip()
-                decision = {
-                    "tool": "remind.add",
-                    "payload": {"text": remind_text, "hhmm": hhmm},
-                    "reply": "",
-                }
-                await self._apply_unified_decision(
-                    decision, from_user, context_token, user_text=text
-                )
-                print(f"[Bot] ⏰ 提醒: {data}")
-                return
-            if intent == INTENT_QUERY_REMIND:
-                log_flow_event(
-                    stage="route",
-                    route="query_remind_intent",
-                    user_text=text,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                )
-                await self._local_view_with_optional_llm_fallback(
-                    "remind", from_user, context_token, text
-                )
-                return
-
-            # 安全兜底：所有路由都没接住 → 不让 LLM 自由写盘，回固定模板，
-            # 同时把意图信息写进 flow log，便于事后复盘补充规则。
-            log_flow_event(
-                stage="route",
-                route="safe_fallback",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={
-                    "intent": intent,
-                    "intent_data": data,
-                    "intent_source": "safe_fallback",
-                    "intent_hint": intent_hint,
-                },
-            )
-            await self.wx.send_text(
-                "我没看懂这条要怎么记。要我把它当作生活记录写进今日日记吗？回「记一下」即可。",
-                from_user,
-                context_token,
-            )
-            print(f"[Bot] >>> safe_fallback: {text[:60]}")
+            await self._run_chat_routing_pipeline(text, from_user, context_token)
         except Exception as e:
             print(f"[Bot] error: {e}")
             if self.cfg["bot"].get("reply_on_error", True):

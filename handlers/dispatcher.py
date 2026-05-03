@@ -1,6 +1,6 @@
 """统一决策与分发层。
 
-- _llm_unified_decide：让大模型把用户原文翻成 {tool, payload, reply} JSON
+- _llm_unified_decide：优先单次 structured 产出 {tool, payload, reply}；失败再仅决策 + unified_reply
 - _coalesce_unified_decision：把 LLM JSON 规整成 (tool, payload, reply) 三元组（含旧名映射、payload 野字段吸收）
 - _apply_unified_decision：根据 tool 名查 _TOOL_HANDLERS 并执行；末尾统一调用 run_post_write_hooks
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, Awaitable, Callable
 
+from acp.opencode_client import OpenCodeACP
 from utils.flow_log import log_flow_event
 from utils.refresh_hooks import run_post_write_hooks
 from utils.tool_names import (
@@ -165,13 +166,13 @@ class DispatcherMixin:
             f"{context_block}"
         )
 
-    async def _llm_unified_decide_action(
+    def _unified_decide_hint_and_context(
         self,
         user_id: str,
         text: str,
         *,
-        intent_hint: dict | None = None,
-    ) -> dict | None:
+        intent_hint: dict | None,
+    ) -> tuple[str, str]:
         current_task = self._get_current_queue_task(user_id)
         remaining = self._get_remaining_queue_tasks(user_id)
         pending_reorder = self._pending_reorders.get(user_id, [])
@@ -181,6 +182,7 @@ class DispatcherMixin:
             pending_reorder=pending_reorder,
             text=text,
         )
+        context_block = self._augment_context_block_with_memory(user_id, context_block)
         hint_block = ""
         if isinstance(intent_hint, dict) and intent_hint:
             try:
@@ -190,10 +192,24 @@ class DispatcherMixin:
                 )
             except Exception:
                 hint_block = ""
-        prompt = (
-            f"{hint_block}"
-            "你是微信个人助手。请只做动作决策，不生成给用户的话术。\n"
-            "你必须仅输出一个 JSON 对象，字段只有 tool 与 payload。\n"
+        return hint_block, context_block
+
+    def _augment_context_block_with_memory(self, user_id: str, context_block: str) -> str:
+        """把 Handler 提供的短期结构化记忆拼进 unified 上下文（可选）。"""
+        extra_ctx = ""
+        ge = getattr(self, "_extra_unified_context", None)
+        if callable(ge):
+            try:
+                extra_ctx = (ge(user_id) or "").strip()
+            except Exception:
+                extra_ctx = ""
+        if extra_ctx:
+            return f"{context_block}{extra_ctx}\n"
+        return context_block
+
+    def _unified_decide_tool_payload_reply_rules_block(self) -> str:
+        """tool/payload/reply 字段说明 + 分流（合并路径与仅决策路径共用）。"""
+        return (
             "字段：\n"
             "- tool: 字符串，取值之一：\n"
             f'  待办：{TOOL_TODO_MERGE_NEW_ITEMS} | {TOOL_TODO_DONE_CURRENT} | {TOOL_TODO_NOT_DONE} | '
@@ -216,19 +232,73 @@ class DispatcherMixin:
             f'- 纯闲聊、问助手在干嘛、评价/吐槽 → {TOOL_DECISION_NONE}（不得假称正在帮用户查日记或记忆）\n'
             f'- 读今日日记/查记忆/列最近几条记录等只读查询由消息层本地处理，若用户句子里已有「查看记录」「最近几条记忆」等触发词，仍选 {TOOL_DECISION_NONE}，不要编造查询结果\n'
             f'- 其它不确定 → {TOOL_DECISION_NONE}\n\n'
+        )
+
+    async def _llm_unified_decide_structured_combined(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        intent_hint: dict | None = None,
+    ) -> dict | None:
+        """单次结构化：tool + payload + reply（正常路径，省第二轮 unified_reply）。"""
+        hint_block, context_block = self._unified_decide_hint_and_context(
+            user_id, text, intent_hint=intent_hint
+        )
+        rules = self._unified_decide_tool_payload_reply_rules_block()
+        prompt = (
+            f"{hint_block}"
+            "你是微信个人助手。请在同一轮输出里同时完成：动作决策（tool+payload）"
+            "与发给用户的中文 reply（微信里自然、简短即可）。\n"
+            "根对象只能包含 tool、payload、reply 三个键；禁止其它键。\n"
+            "reply：须至少一句可见中文；换行写成 \\\\n；"
+            "禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；"
+            "tool 非 none 时可附带一句简短确认。\n\n"
+            f"{rules}"
+            f"{context_block}"
+        )
+        op_cfg = self.cfg.get("opencode", {}) or {}
+        retry_count = int(op_cfg.get("structured_retry_count", 3) or 3)
+        schema = self._unified_decision_schema(include_reply=True)
+        return await self.acp.prompt_structured(
+            self.unified_session_id,
+            prompt,
+            json_schema=schema,
+            retry_count=retry_count,
+            trace_tag="unified_decide_combined",
+        )
+
+    async def _llm_unified_decide_structured_decision_only(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        intent_hint: dict | None = None,
+    ) -> dict | None:
+        """仅决策（无 reply）；供合并路径失败后的兜底，reply 由 unified_reply 或 spill 补上。"""
+        hint_block, context_block = self._unified_decide_hint_and_context(
+            user_id, text, intent_hint=intent_hint
+        )
+        rules = self._unified_decide_tool_payload_reply_rules_block()
+        prompt = (
+            f"{hint_block}"
+            "你是微信个人助手。请只做动作决策，不生成给用户的话术。\n"
+            "根对象只能包含 tool、payload 两个键；禁止出现 reply、message、content 等任何其它键，"
+            "即使用户在闲聊、角色扮演也不要在本轮输出里写回复正文。\n"
+            "你必须仅输出一个 JSON 对象，字段只有 tool 与 payload。\n"
+            f"{rules}"
             f"{context_block}"
         )
         op_cfg = self.cfg.get("opencode", {}) or {}
         retry_count = int(op_cfg.get("structured_retry_count", 3) or 3)
         schema = self._unified_decision_schema(include_reply=False)
-        decision = await self.acp.prompt_structured(
+        return await self.acp.prompt_structured(
             self.unified_session_id,
             prompt,
             json_schema=schema,
             retry_count=retry_count,
             trace_tag="unified_decide_structured",
         )
-        return decision
 
     async def _llm_generate_unified_reply(
         self,
@@ -270,34 +340,64 @@ class DispatcherMixin:
         *,
         intent_hint: dict | None = None,
     ) -> dict:
-        """统一决策：structured 优先，文本 JSON 回退；回复文案与动作解耦。"""
-        decision = await self._llm_unified_decide_action(
+        """优先单次 structured 产出 tool+payload+reply；仅当该路径失败时才拆成仅决策 + unified_reply。"""
+        max_rl = int((self.cfg.get("bot") or {}).get("max_reply_length", 2000) or 2000)
+
+        decision = await self._llm_unified_decide_structured_combined(
             user_id=user_id, text=text, intent_hint=intent_hint
         )
         if isinstance(decision, dict):
+            tool, payload, reply = _coalesce_unified_decision(decision)
+            if reply and max_rl > 0 and len(reply) > max_rl:
+                reply = reply[:max_rl]
             log_flow_event(
                 stage="route",
                 route="unified_structured_ok",
                 user_text=text,
                 session_id=self.unified_session_id,
-                extra={"decision": decision},
+                extra={"decision": decision, "unified_struct_path": "combined"},
             )
+            return {"tool": tool, "payload": payload, "reply": reply}
+
+        decision = await self._llm_unified_decide_structured_decision_only(
+            user_id=user_id, text=text, intent_hint=intent_hint
+        )
+        if isinstance(decision, dict):
+            spill_key = OpenCodeACP.STRUCTURED_DECISION_SPILL_REPLY_KEY
+            spill = str(decision.pop(spill_key, "") or "").strip()
+            if spill and max_rl > 0 and len(spill) > max_rl:
+                spill = spill[:max_rl]
             tool, payload, _ = _coalesce_unified_decision(decision)
-            try:
-                reply = await self._llm_generate_unified_reply(
-                    user_text=text,
-                    tool=tool,
-                    payload=payload,
-                )
-            except Exception as e:  # noqa: BLE001
-                log_flow_event(
-                    stage="route",
-                    route="reply_generate_fail",
-                    user_text=text,
-                    session_id=self.unified_session_id,
-                    extra={"error": str(e)[:200], "tool": tool},
-                )
-                reply = ""
+            log_flow_event(
+                stage="route",
+                route="unified_structured_ok",
+                user_text=text,
+                session_id=self.unified_session_id,
+                extra={
+                    "decision": decision,
+                    "unified_struct_path": "decision_only",
+                    "structured_spill_reused": bool(spill and tool == TOOL_DECISION_NONE),
+                },
+            )
+            reply = ""
+            if spill and tool == TOOL_DECISION_NONE:
+                reply = spill
+            else:
+                try:
+                    reply = await self._llm_generate_unified_reply(
+                        user_text=text,
+                        tool=tool,
+                        payload=payload,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log_flow_event(
+                        stage="route",
+                        route="reply_generate_fail",
+                        user_text=text,
+                        session_id=self.unified_session_id,
+                        extra={"error": str(e)[:200], "tool": tool},
+                    )
+                    reply = ""
             return {"tool": tool, "payload": payload, "reply": reply}
 
         log_flow_event(
@@ -317,6 +417,7 @@ class DispatcherMixin:
             pending_reorder=pending_reorder,
             text=text,
         )
+        context_block = self._augment_context_block_with_memory(user_id, context_block)
         hint_block = ""
         if isinstance(intent_hint, dict) and intent_hint:
             try:
@@ -376,6 +477,15 @@ class DispatcherMixin:
             handled = await handler(self, payload, reply, from_user, context_token, user_text)
             if handled:
                 run_post_write_hooks(self, tool, payload)
+                remember = getattr(self, "_remember_unified_decision", None)
+                if callable(remember):
+                    try:
+                        remember(
+                            from_user,
+                            {"tool": tool, "payload": dict(payload), "reply": reply},
+                        )
+                    except Exception:
+                        pass
             return handled
 
         # 未知 tool：尽量不让用户被静默丢弃
