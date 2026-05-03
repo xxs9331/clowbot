@@ -183,13 +183,18 @@ class Handler(
         state["last_outcome"] = "success" if handled else "failed"
         state["updated_at"] = time.time()
 
-        # 收集事实（仅对写操作）
-        if tool in ("record.add", "remind.add"):
-            fact = (payload.get("text") or user_text)[:120]
+        # 收集事实（P1a 首版：list[str]，仅保存可读摘要）
+        collected_line = self._build_collected_data_line(
+            tool=tool,
+            payload=payload,
+            user_text=user_text,
+            handled=handled,
+        )
+        if collected_line:
             collected = state.setdefault("collected_data", [])
-            if fact not in collected:
-                collected.append(fact)
-                if len(collected) > 10:
+            if collected_line not in collected:
+                collected.append(collected_line)
+                while len(collected) > 5:
                     collected.pop(0)
 
         # 更新下一步提示（轻量）
@@ -202,6 +207,44 @@ class Handler(
 
         # 持久化（静默失败）
         self._persist_structured_state(user_id)
+
+    @staticmethod
+    def _build_collected_data_line(
+        *,
+        tool: str,
+        payload: dict,
+        user_text: str,
+        handled: bool,
+    ) -> str:
+        """P1a：把本轮结果压成可直接注入 prompt 的单行文本。"""
+        if not handled or not tool or tool == "none":
+            return ""
+        if tool == "record.add":
+            text = str(payload.get("text") or user_text or "").strip()[:80]
+            event_date = str(payload.get("event_date") or "").strip()
+            category = str(payload.get("category") or "").strip()
+            suffix = []
+            if category:
+                suffix.append(category)
+            if event_date:
+                suffix.append(event_date)
+            tail = f" ({'|'.join(suffix)})" if suffix else ""
+            return f"记录: {text}{tail}".strip()
+        if tool == "remind.add":
+            hhmm = str(payload.get("hhmm") or "").strip()
+            text = str(payload.get("text") or user_text or "").strip()[:80]
+            prefix = f"{hhmm} " if hhmm else ""
+            return f"提醒: {prefix}{text}".strip()
+        if tool == "todo.merge_new_items":
+            tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+            if tasks:
+                brief = "、".join(str(x)[:20] for x in tasks[:3])
+                extra = "…" if len(tasks) > 3 else ""
+                return f"待办新增: {brief}{extra}"
+            return "待办新增"
+        if tool in ("todo.done_current", "todo.not_done", "todo.next", "todo.skip_current"):
+            return f"待办推进: {tool}"
+        return ""
 
     def _structured_state_context_block(self, user_id: str) -> str:
         """生成结构化 state 上下文块（注入 prompt 顶部）。"""
@@ -642,12 +685,22 @@ class Handler(
         if not isinstance(sent, list):
             sent = []
         extras = getattr(self, "_eval_extras", []) or []
+        state_snapshot = {}
+        try:
+            st = self._get_or_init_structured_state(from_user)
+            state_snapshot = {
+                "collected_data": list((st.get("collected_data") or [])[-5:]),
+                "consecutive_auto_steps": st.get("consecutive_auto_steps", 0),
+            }
+        except Exception:
+            state_snapshot = {}
         return {
             "user_text": text,
             "from_user": from_user,
             "decisions_applied": list(self._eval_pipeline_trace),
             "eval_extras": list(extras),
             "wx_sent": list(sent),
+            "structured_state_snapshot": state_snapshot,
         }
 
     async def _run_chat_routing_pipeline(

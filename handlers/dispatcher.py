@@ -281,9 +281,9 @@ class DispatcherMixin:
         parts = []
         if state_block:
             parts.append(state_block)
-        parts.append(context_block)
         if extra_ctx:
             parts.append(extra_ctx)
+        parts.append(context_block)
         return "\n".join(parts) + "\n"
 
     def _unified_decide_tool_payload_reply_rules_block(self) -> str:

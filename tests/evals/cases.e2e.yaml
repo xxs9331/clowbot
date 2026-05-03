@@ -35,6 +35,8 @@ cases:
     tier: simple
     input: "叫我今晚21:30刷牙"
     expect_tools_any: ["remind.add"]
+    # 验证跨消息 state 注入：本条应能看到上一条(e04)留下的 collected_data
+    expect_state_contains: ["09:15"]
 
   # ─── 中等（10）：unified + 意图，软断言为主 ───
   - id: e06_record_weight

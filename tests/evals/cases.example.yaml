@@ -15,6 +15,7 @@ cases:
       tasks: ["写评测骨架", "补 structured state"]
       idx: 0
     expect_tool: "todo.done_current"
+    expect_state_contains: ["待办推进: todo.done_current"]
 
   # 简单：查看待办 → 走 local_view，不进入 unified apply
   - id: local_view_todo

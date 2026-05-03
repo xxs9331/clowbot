@@ -159,6 +159,14 @@ def _joined_wx(result: dict) -> str:
     return "\n".join(str(x) for x in parts if x)
 
 
+def _joined_state_collected(result: dict) -> str:
+    snap = result.get("structured_state_snapshot") or {}
+    items = snap.get("collected_data") if isinstance(snap, dict) else []
+    if not isinstance(items, list):
+        return ""
+    return "\n".join(str(x) for x in items if x)
+
+
 def _norm_list(val: Any) -> list:
     if val is None:
         return []
@@ -209,6 +217,11 @@ def assert_case_expectations(case: dict[str, Any], result: dict) -> list[str]:
         decs = result.get("decisions_applied") or []
         if not wx_blob and not decs:
             failures.append(f"[{cid}] expect_wx_nonempty but wx_sent and decisions are empty")
+
+    for sub in _norm_list(case.get("expect_state_contains")):
+        blob = _joined_state_collected(result)
+        if sub not in blob:
+            failures.append(f"[{cid}] expect_state_contains substring missing: {sub!r}; state={blob!r}")
 
     return failures
 

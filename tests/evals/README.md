@@ -44,6 +44,7 @@ pytest tests/test_eval_runner.py::test_eval_e2e_yaml_real_acp -q
 | `expect_reply_contains` | 子串（字符串或列表），均在 `wx_sent` 拼接文本中 |
 | `expect_eval_extra_branch` | `local_view` / `safe_fallback` 等（见 `handlers/base.py`） |
 | `expect_wx_nonempty` | 为真时要求 `wx_sent` 或 `decisions_applied` 至少其一非空 |
+| `expect_state_contains` | 子串（字符串或列表），在 `structured_state_snapshot.collected_data` 中出现 |
 
 仓库内建：
 

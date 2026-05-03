@@ -108,3 +108,30 @@ def test_tool_status_debounce(tmp_path: Path):
     )
     assert isinstance(wx.sent, list)
     assert len(wx.sent) == 1
+
+
+def test_structured_state_collects_list_str_summary(tmp_path: Path):
+    h = _build_handler(tmp_path)
+    decision = {
+        "tool": "record.add",
+        "payload": {"text": "体重 71.2kg", "category": "身体", "event_date": "2026-05-03"},
+        "reply": "",
+    }
+    h._update_structured_state("u1", decision=decision, handled=True, user_text="体重 71.2kg")
+    st = h._get_or_init_structured_state("u1")
+    collected = st.get("collected_data") or []
+    assert isinstance(collected, list)
+    assert any("记录: 体重 71.2kg" in str(x) for x in collected)
+
+
+def test_structured_state_context_block_contains_collected_data(tmp_path: Path):
+    h = _build_handler(tmp_path)
+    h._update_structured_state(
+        "u1",
+        decision={"tool": "remind.add", "payload": {"hhmm": "09:15", "text": "喝水"}, "reply": ""},
+        handled=True,
+        user_text="09:15 提醒我喝水",
+    )
+    block = h._structured_state_context_block("u1")
+    assert "structured_state" in block
+    assert "09:15" in block
