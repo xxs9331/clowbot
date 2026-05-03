@@ -23,6 +23,10 @@ opencode:
   # false：禁止 record_add 走意图高分短路，一律交给 unified（续写/代词更稳）
   # true：允许短路，但对极短句/代词句仍会阻止短路
   record_high_conf_short_circuit: false
+  # 路由短期记忆超过阈值时写入 .clawbot_tmp/context_spills/*.json，仅回注句柄
+  # 首条记忆用较大阈值；同会话后续条用 followup，减轻多轮回环时上下文膨胀
+  memory_spill_chars: 2000
+  memory_spill_chars_followup: 1200
 
 # ─── Vault 路径 ───
 vault:
@@ -44,3 +48,9 @@ bot:
   reply_on_error: true           # 出错时告知用户
   typing_indicator: true         # 处理中显示"正在输入"
   max_reply_length: 2000         # 回复最大长度（微信限制）
+  # 工具中间态提示（executing/result_ready/done），默认关闭避免刷屏
+  tool_progress_messages: false
+  tool_progress_min_interval_sec: 0.8
+  # 工具执行超过该秒数仍未返回时发一条慢提示（与 tool_progress_messages 独立；0 关闭）
+  tool_slow_hint_seconds: 3
+  tool_slow_hint_text: "还在处理中，稍等我一下…"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from acp.opencode_client import OpenCodeACP
 
@@ -41,6 +42,25 @@ def test_merge_conflict_prefers_result_text():
     assert reply == "结果侧完整句"
     assert meta["reply_merge_conflict"] is True
     assert meta["reply_selected_source"] == "result"
+
+
+def test_json_brace_balanced_for_tool_args():
+    assert OpenCodeACP._json_brace_balanced('{"a":1,"b":{"c":2}}') is True
+    assert OpenCodeACP._json_brace_balanced('{"a":1') is False
+
+
+def test_json_brace_balanced_ignores_braces_inside_string_values():
+    inner = json.dumps({"x": 1}, separators=(",", ":"))
+    outer = json.dumps({"a": inner}, ensure_ascii=False)
+    assert OpenCodeACP._json_brace_balanced(outer) is True
+
+
+def test_tool_call_name_and_args_extracts_common_fields():
+    name, args = OpenCodeACP._tool_call_name_and_args(
+        {"toolName": "fs/read_text_file", "arguments": '{"path":"a.md"}'}
+    )
+    assert name == "fs/read_text_file"
+    assert args == '{"path":"a.md"}'
 
 
 def test_project_obj_strips_extra_keys_when_additional_properties_false():

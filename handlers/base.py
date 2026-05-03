@@ -3,7 +3,9 @@
 import asyncio
 import json
 import re
+import time
 import uuid
+from pathlib import Path
 
 from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.intent import (
@@ -68,6 +70,73 @@ class Handler(
         self._local_view_debounce_sec: float = 2.0
         # 每用户最近若干条结构化决策（供 unified / 意图分类续写对齐）
         self._user_route_memory: dict[str, list[dict]] = {}
+        # 工具状态提示防抖（避免 200ms 内反复切换）
+        self._tool_status_last: dict[tuple[str, str], tuple[float, str]] = {}
+
+    def _context_spill_dir(self) -> Path:
+        root = Path(self.cfg["vault"]["root"]).resolve()
+        p = root / ".clawbot_tmp" / "context_spills"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _maybe_spill_payload_for_memory(
+        self, *, user_id: str, tool: str, payload: dict
+    ) -> dict:
+        """大体积 payload 不直接塞进 memory 上下文，改为文件句柄。"""
+        oc = self.cfg.get("opencode") or {}
+        max_first = int(oc.get("memory_spill_chars", 2000) or 2000)
+        max_follow = int(
+            oc.get("memory_spill_chars_followup")
+            or oc.get("memory_spill_chars_round2", 1200)
+            or 1200
+        )
+        lst = self._user_route_memory.get(user_id, [])
+        max_chars = max_follow if len(lst) >= 1 else max_first
+        try:
+            raw = json.dumps(payload or {}, ensure_ascii=False)
+        except Exception:
+            return payload
+        if len(raw) <= max_chars:
+            return payload
+        sid = uuid.uuid4().hex[:10]
+        fp = self._context_spill_dir() / f"{user_id[-6:] or 'anon'}-{tool.replace('.', '_')}-{sid}.json"
+        fp.write_text(raw, encoding="utf-8")
+        return {
+            "_spilled": True,
+            "spill_file": str(fp),
+            "summary": raw[:200],
+            "chars": len(raw),
+        }
+
+    async def _emit_tool_status(
+        self,
+        *,
+        from_user: str,
+        context_token: str,
+        tool: str,
+        phase: str,
+        detail: str = "",
+    ) -> None:
+        """可选中间态提示：idle→executing→done（带防抖，默认关闭）。"""
+        bot_cfg = self.cfg.get("bot") or {}
+        if not bool(bot_cfg.get("tool_progress_messages", False)):
+            return
+        min_iv = float(bot_cfg.get("tool_progress_min_interval_sec", 0.8) or 0.8)
+        key = (from_user, tool)
+        now = time.monotonic()
+        prev = self._tool_status_last.get(key)
+        if prev and (now - prev[0] < min_iv) and prev[1] == phase:
+            return
+        self._tool_status_last[key] = (now, phase)
+        text = {
+            "executing": f"正在执行 {tool}...",
+            "result_ready": f"{tool} 已返回结果，正在整理...",
+            "done": f"{tool} 处理完成。",
+            "failed": f"{tool} 处理失败。",
+        }.get(phase, f"{tool}: {phase}")
+        if detail:
+            text = f"{text}\n{detail}"
+        await self.wx.send_text(text, from_user, context_token)
 
     def _remember_unified_decision(self, from_user: str, decision: dict) -> None:
         """成功执行 tool 后写入短期记忆（仅关键字段，控制体积）。"""
@@ -86,6 +155,9 @@ class Handler(
         if not isinstance(payload, dict):
             return
         slim = {k: payload.get(k) for k in keys if k in payload}
+        slim = self._maybe_spill_payload_for_memory(
+            user_id=from_user, tool=tool, payload=slim
+        )
         entry = {"tool": tool, "payload": slim}
         lst = self._user_route_memory.setdefault(from_user, [])
         lst.append(entry)

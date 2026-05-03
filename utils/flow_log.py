@@ -147,6 +147,18 @@ def log_acp_turn(
         lines.append(f"  reply_selected_source: {m.get('reply_selected_source')}")
     if m.get("reply_merge_conflict"):
         lines.append(f"  reply_merge_conflict: {m.get('reply_merge_conflict')}")
+    if m.get("tool_args_partial_updates") is not None:
+        lines.append(f"  tool_args_partial_updates: {m.get('tool_args_partial_updates')}")
+    if m.get("tool_args_finalized") is not None:
+        lines.append(f"  tool_args_finalized: {m.get('tool_args_finalized')}")
+    if m.get("tool_status_transitions"):
+        try:
+            lines.append(
+                "  tool_status_transitions: "
+                + json.dumps(m.get("tool_status_transitions"), ensure_ascii=False, default=str)
+            )
+        except Exception:
+            lines.append(f"  tool_status_transitions: {str(m.get('tool_status_transitions'))[:500]}")
     if reasoning:
         lines.append(f"  reasoning_preview:\n{_snip(reasoning, PREVIEW_REASONING)}")
     else:

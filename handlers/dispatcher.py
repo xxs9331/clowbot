@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 from typing import Any, Awaitable, Callable
 
 from acp.opencode_client import OpenCodeACP
@@ -127,6 +129,57 @@ class DispatcherMixin:
         )
 
     @staticmethod
+    def _select_candidate_tools(text: str, current_task: str, remaining: list[str]) -> list[str]:
+        """动态工具发现：本轮只高亮少量候选工具，降低工具认知过载。"""
+        t = (text or "").strip()
+        out = [TOOL_DECISION_NONE]
+        if any(k in t for k in ("提醒", "叫我", "闹钟", "别忘")):
+            out.append(TOOL_REMIND_ADD)
+        if any(k in t for k in ("记录", "记一下", "改签", "体重", "跑步", "快递")):
+            out.append(TOOL_RECORD_ADD)
+        if any(k in t for k in ("待办", "下一个", "做完", "跳过", "放弃", "重排")):
+            out.extend(
+                [
+                    TOOL_TODO_MERGE_NEW_ITEMS,
+                    TOOL_TODO_DONE_CURRENT,
+                    TOOL_TODO_NOT_DONE,
+                    TOOL_TODO_NEXT,
+                    TOOL_TODO_REORDER,
+                    TOOL_TODO_REORDER_CONFIRM,
+                    TOOL_TODO_SKIP_CURRENT,
+                    TOOL_TODO_ABANDON_CURRENT,
+                ]
+            )
+        if current_task or remaining:
+            out.extend(
+                [
+                    TOOL_TODO_DONE_CURRENT,
+                    TOOL_TODO_NOT_DONE,
+                    TOOL_TODO_NEXT,
+                    TOOL_TODO_SKIP_CURRENT,
+                    TOOL_TODO_ABANDON_CURRENT,
+                ]
+            )
+        # 保序去重
+        seen = set()
+        uniq: list[str] = []
+        for x in out:
+            if x in seen:
+                continue
+            seen.add(x)
+            uniq.append(x)
+        return uniq
+
+    @staticmethod
+    def _tool_discovery_hint(candidates: list[str]) -> str:
+        return (
+            "本轮候选工具（动态发现，仅缩小搜索范围；"
+            "纯闲聊、只读查询、不确定时仍必须选 none，不要因为出现在列表里就强行选工具）：\n"
+            + ", ".join(candidates)
+            + "\n\n"
+        )
+
+    @staticmethod
     def _build_unified_legacy_prompt(hint_block: str, context_block: str) -> str:
         return (
             f"{hint_block}"
@@ -163,6 +216,10 @@ class DispatcherMixin:
             f'- 纯闲聊/问助手状态 → {TOOL_DECISION_NONE}，reply 禁止假称正在查日记\n'
             f'- 查日记/记忆等只读需求由入口层处理，仍输出 {TOOL_DECISION_NONE}，reply 可提示用户用「查看记录」等，勿编造列表\n'
             f'- 其它不确定 → {TOOL_DECISION_NONE}\n\n'
+            "何时不用（反例）：\n"
+            f'- 不要把「查看记录/查看待办/查看提醒」判成 {TOOL_RECORD_ADD} 或 {TOOL_TODO_MERGE_NEW_ITEMS}\n'
+            f'- 不要把无时间的“记得提醒我”直接判成 {TOOL_REMIND_ADD}（应先要时间或给 none）\n'
+            f'- 不要把纯情绪/寒暄句判成 todo.*，应给 {TOOL_DECISION_NONE}\n\n'
             f"{context_block}"
         )
 
@@ -172,10 +229,11 @@ class DispatcherMixin:
         text: str,
         *,
         intent_hint: dict | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         current_task = self._get_current_queue_task(user_id)
         remaining = self._get_remaining_queue_tasks(user_id)
         pending_reorder = self._pending_reorders.get(user_id, [])
+        candidates = self._select_candidate_tools(text, current_task, remaining)
         context_block = self._build_unified_context_block(
             current_task=current_task,
             remaining=remaining,
@@ -183,6 +241,7 @@ class DispatcherMixin:
             text=text,
         )
         context_block = self._augment_context_block_with_memory(user_id, context_block)
+        tool_hint_block = self._tool_discovery_hint(candidates)
         hint_block = ""
         if isinstance(intent_hint, dict) and intent_hint:
             try:
@@ -192,7 +251,7 @@ class DispatcherMixin:
                 )
             except Exception:
                 hint_block = ""
-        return hint_block, context_block
+        return hint_block, context_block, tool_hint_block
 
     def _augment_context_block_with_memory(self, user_id: str, context_block: str) -> str:
         """把 Handler 提供的短期结构化记忆拼进 unified 上下文（可选）。"""
@@ -232,6 +291,10 @@ class DispatcherMixin:
             f'- 纯闲聊、问助手在干嘛、评价/吐槽 → {TOOL_DECISION_NONE}（不得假称正在帮用户查日记或记忆）\n'
             f'- 读今日日记/查记忆/列最近几条记录等只读查询由消息层本地处理，若用户句子里已有「查看记录」「最近几条记忆」等触发词，仍选 {TOOL_DECISION_NONE}，不要编造查询结果\n'
             f'- 其它不确定 → {TOOL_DECISION_NONE}\n\n'
+            "何时不用（反例）：\n"
+            f'- 不要把「查看记录/查看待办/查看提醒」判成 {TOOL_RECORD_ADD} 或 {TOOL_TODO_MERGE_NEW_ITEMS}\n'
+            f'- 不要把无时间的“记得提醒我”直接判成 {TOOL_REMIND_ADD}（应先要时间或给 none）\n'
+            f'- 不要把纯情绪/寒暄句判成 todo.*，应给 {TOOL_DECISION_NONE}\n\n'
         )
 
     async def _llm_unified_decide_structured_combined(
@@ -242,7 +305,7 @@ class DispatcherMixin:
         intent_hint: dict | None = None,
     ) -> dict | None:
         """单次结构化：tool + payload + reply（正常路径，省第二轮 unified_reply）。"""
-        hint_block, context_block = self._unified_decide_hint_and_context(
+        hint_block, context_block, tool_hint = self._unified_decide_hint_and_context(
             user_id, text, intent_hint=intent_hint
         )
         rules = self._unified_decide_tool_payload_reply_rules_block()
@@ -254,6 +317,7 @@ class DispatcherMixin:
             "reply：须至少一句可见中文；换行写成 \\\\n；"
             "禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；"
             "tool 非 none 时可附带一句简短确认。\n\n"
+            f"{tool_hint}"
             f"{rules}"
             f"{context_block}"
         )
@@ -276,7 +340,7 @@ class DispatcherMixin:
         intent_hint: dict | None = None,
     ) -> dict | None:
         """仅决策（无 reply）；供合并路径失败后的兜底，reply 由 unified_reply 或 spill 补上。"""
-        hint_block, context_block = self._unified_decide_hint_and_context(
+        hint_block, context_block, tool_hint = self._unified_decide_hint_and_context(
             user_id, text, intent_hint=intent_hint
         )
         rules = self._unified_decide_tool_payload_reply_rules_block()
@@ -286,6 +350,7 @@ class DispatcherMixin:
             "根对象只能包含 tool、payload 两个键；禁止出现 reply、message、content 等任何其它键，"
             "即使用户在闲聊、角色扮演也不要在本轮输出里写回复正文。\n"
             "你必须仅输出一个 JSON 对象，字段只有 tool 与 payload。\n"
+            f"{tool_hint}"
             f"{rules}"
             f"{context_block}"
         )
@@ -474,8 +539,96 @@ class DispatcherMixin:
 
         handler = _TOOL_HANDLERS.get(tool)
         if handler is not None:
-            handled = await handler(self, payload, reply, from_user, context_token, user_text)
+            emit = getattr(self, "_emit_tool_status", None)
+            bot_cfg = self.cfg.get("bot") or {}
+            slow_sec = float(bot_cfg.get("tool_slow_hint_seconds", 3) or 0)
+            slow_msg = str(bot_cfg.get("tool_slow_hint_text") or "").strip() or "还在处理中，稍等我一下…"
+            if callable(emit):
+                try:
+                    await emit(
+                        from_user=from_user,
+                        context_token=context_token,
+                        tool=tool,
+                        phase="executing",
+                    )
+                except Exception:
+                    pass
+            actionable = (
+                "请补充更具体的待办/提醒内容，或先发「查看记录」「查看待办」确认当前状态后再试。"
+            )
+            try:
+                if slow_sec > 0:
+                    exec_task = asyncio.create_task(
+                        handler(self, payload, reply, from_user, context_token, user_text)
+                    )
+                    wait_task = asyncio.create_task(asyncio.sleep(slow_sec))
+                    done, _pending = await asyncio.wait(
+                        {exec_task, wait_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if exec_task in done:
+                        wait_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await wait_task
+                        handled = await exec_task
+                    else:
+                        await self.wx.send_text(slow_msg, from_user, context_token)
+                        log_flow_event(
+                            stage="route",
+                            route="tool_slow_hint",
+                            user_text=user_text,
+                            from_user=from_user,
+                            session_id=self.unified_session_id,
+                            extra={"tool": tool, "after_sec": slow_sec},
+                        )
+                        handled = await exec_task
+                else:
+                    handled = await handler(
+                        self, payload, reply, from_user, context_token, user_text
+                    )
+            except Exception as e:  # noqa: BLE001
+                if callable(emit):
+                    try:
+                        await emit(
+                            from_user=from_user,
+                            context_token=context_token,
+                            tool=tool,
+                            phase="failed",
+                        )
+                    except Exception:
+                        pass
+                structured = {
+                    "error": str(e)[:500],
+                    "error_type": type(e).__name__,
+                    "actionable_hint": actionable,
+                    "tool": tool,
+                }
+                log_flow_event(
+                    stage="route",
+                    route="tool_handler_error",
+                    user_text=user_text,
+                    from_user=from_user,
+                    session_id=self.unified_session_id,
+                    extra=structured,
+                )
+                err_line = str(e).strip().replace("\n", " ")[:160]
+                await self.wx.send_text(
+                    f"处理失败：{err_line}\n{actionable}",
+                    from_user,
+                    context_token,
+                )
+                return True
             if handled:
+                if callable(emit):
+                    try:
+                        await emit(
+                            from_user=from_user,
+                            context_token=context_token,
+                            tool=tool,
+                            phase="result_ready",
+                        )
+                    except Exception:
+                        pass
                 run_post_write_hooks(self, tool, payload)
                 remember = getattr(self, "_remember_unified_decision", None)
                 if callable(remember):
@@ -486,10 +639,28 @@ class DispatcherMixin:
                         )
                     except Exception:
                         pass
+                if callable(emit):
+                    try:
+                        await emit(
+                            from_user=from_user,
+                            context_token=context_token,
+                            tool=tool,
+                            phase="done",
+                        )
+                    except Exception:
+                        pass
             return handled
 
         # 未知 tool：尽量不让用户被静默丢弃
         if reply:
             await self.wx.send_text(reply, from_user, context_token)
             return True
+        await self.wx.send_text(
+            "这个动作我暂时执行不了。建议：\n"
+            "1) 直接说“记一条记录：…（可带日期）”\n"
+            "2) 或说“提醒我 HH:MM …”\n"
+            "3) 或先发“查看记录/查看待办”确认当前状态",
+            from_user,
+            context_token,
+        )
         return False

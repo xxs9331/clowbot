@@ -361,6 +361,54 @@ class OpenCodeACP:
         return ""
 
     @staticmethod
+    def _json_brace_balanced(text: str) -> bool:
+        """粗判 JSON 是否闭合（用于 tool args 分片结束判断）。"""
+        s = (text or "").strip()
+        if not s:
+            return False
+        depth = 0
+        in_str = False
+        esc = False
+        for ch in s:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+        return depth == 0 and s.startswith("{") and s.endswith("}")
+
+    @staticmethod
+    def _tool_call_name_and_args(update: dict) -> tuple[str, str]:
+        """兼容不同网关字段：提取 tool 名与参数分片。"""
+        if not isinstance(update, dict):
+            return "", ""
+        name = str(
+            update.get("name")
+            or update.get("toolName")
+            or update.get("tool_name")
+            or ""
+        ).strip()
+        args = update.get("arguments")
+        if args is None:
+            args = update.get("args")
+        if args is None:
+            content = update.get("content")
+            if isinstance(content, dict):
+                args = content.get("arguments") or content.get("args")
+                name = name or str(content.get("name") or content.get("toolName") or "").strip()
+        return name, str(args or "")
+
+    @staticmethod
     def _extract_first_json_object(text: str) -> dict | None:
         s = (text or "").strip()
         if not s:
@@ -483,6 +531,11 @@ class OpenCodeACP:
         saw_final_response = False
         break_reason = "deadline_timeout"
         update_counters: dict[str, int] = {}
+        # tool_call 参数分片：只在参数闭合后视为可执行，避免 partial arguments 闪烁/误执行
+        tool_args_buf: dict[str, str] = {}
+        tool_args_partial_updates = 0
+        tool_args_finalized = 0
+        tool_status_transitions: list[str] = []
         deadline = time.time() + timeout
         last_activity = time.time()
 
@@ -548,7 +601,15 @@ class OpenCodeACP:
                         update.get("textDelta", update.get("text", ""))
                     )
                 elif su in ("tool_call_update", "tool_call"):
-                    pass  # 工具调用（fs 操作等），不需要收集文本
+                    name, arg_chunk = self._tool_call_name_and_args(update)
+                    if name:
+                        tool_status_transitions.append(f"executing:{name}")
+                    if arg_chunk:
+                        key = name or f"tool_{len(tool_args_buf)+1}"
+                        tool_args_buf[key] = (tool_args_buf.get(key, "") + arg_chunk)
+                        tool_args_partial_updates += 1
+                        if self._json_brace_balanced(tool_args_buf[key]):
+                            tool_args_finalized += 1
                 elif su == "end_turn":
                     saw_end_turn = True
                     break_reason = "end_turn"
@@ -579,6 +640,9 @@ class OpenCodeACP:
             "saw_final_response": saw_final_response,
             "break_reason": break_reason,
             "update_counters": update_counters,
+            "tool_args_partial_updates": tool_args_partial_updates,
+            "tool_args_finalized": tool_args_finalized,
+            "tool_status_transitions": tool_status_transitions[:12],
         }
 
     # ─── 业务 API ───
@@ -695,6 +759,9 @@ class OpenCodeACP:
                 "saw_final_response": collected.get("saw_final_response"),
                 "break_reason": collected.get("break_reason"),
                 "update_counters": collected.get("update_counters"),
+                "tool_args_partial_updates": collected.get("tool_args_partial_updates"),
+                "tool_args_finalized": collected.get("tool_args_finalized"),
+                "tool_status_transitions": collected.get("tool_status_transitions"),
                 **merge_meta,
             },
         )
@@ -820,6 +887,9 @@ class OpenCodeACP:
                 "saw_final_response": collected.get("saw_final_response"),
                 "break_reason": collected.get("break_reason"),
                 "update_counters": collected.get("update_counters"),
+                "tool_args_partial_updates": collected.get("tool_args_partial_updates"),
+                "tool_args_finalized": collected.get("tool_args_finalized"),
+                "tool_status_transitions": collected.get("tool_status_transitions"),
                 **merge_meta,
             },
         )
