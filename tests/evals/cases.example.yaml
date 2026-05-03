@@ -16,6 +16,15 @@ cases:
       idx: 0
     expect_tool: "todo.done_current"
     expect_state_contains: ["待办推进: todo.done_current"]
+    expect_reply_contains:
+      - "处理中"
+      - "下一个"
+      - "写评测骨架"
+      - "补 structured state"
+    expect_decisions_len: 1
+    expect_wx_max_len: 3
+    expect_tool_counts:
+      todo.done_current: 1
 
   # 简单：查看待办 → 走 local_view，不进入 unified apply
   - id: local_view_todo
@@ -24,6 +33,25 @@ cases:
     expect_eval_extra_branch: "local_view"
     expect_reply_contains:
       - "待办"
+
+  - id: p1b_done_when_queue_tail
+    tier: simple
+    input: "搞定了"
+    from_user: "eval-user-p1b-tail"
+    pre_setup:
+      active_todo_queue: true
+      tasks: ["最后一项"]
+      idx: 0
+    expect_tool: "todo.done_current"
+    expect_reply_contains:
+      - "处理中"
+      - "下一个"
+      - "最后一项"
+      - "全部完成"
+    expect_decisions_len: 1
+    expect_wx_max_len: 3
+    expect_tool_counts:
+      todo.done_current: 1
 
   # 中等：无规则命中、无 LLM（acp=None）→ unified 失败后 safe_fallback
   - id: safe_fallback_gibberish

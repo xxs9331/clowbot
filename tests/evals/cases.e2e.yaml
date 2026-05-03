@@ -19,6 +19,44 @@ cases:
     from_user: "e2e-u-fast"
     pre_setup: { active_todo_queue: true, tasks: ["写代码", "跑评测"], idx: 0 }
     expect_tool: "todo.done_current"
+    expect_reply_contains:
+      - "处理中"
+      - "下一个"
+      - "写代码"
+      - "跑评测"
+    expect_decisions_len: 1
+    expect_wx_max_len: 3
+    expect_tool_counts:
+      todo.done_current: 1
+
+  - id: p1b_done_then_next_once
+    tier: simple
+    input: "好了"
+    from_user: "e2e-p1b-next"
+    pre_setup: { active_todo_queue: true, tasks: ["任务甲", "任务乙"], idx: 0 }
+    expect_tool: "todo.done_current"
+    expect_reply_contains:
+      - "下一个"
+      - "任务甲"
+      - "任务乙"
+    expect_decisions_len: 1
+    expect_wx_max_len: 3
+    expect_tool_counts:
+      todo.done_current: 1
+
+  - id: p1b_done_when_queue_tail
+    tier: simple
+    input: "做完了"
+    from_user: "e2e-p1b-tail"
+    pre_setup: { active_todo_queue: true, tasks: ["收尾项"], idx: 0 }
+    expect_tool: "todo.done_current"
+    expect_reply_contains:
+      - "全部完成"
+      - "收尾项"
+    expect_decisions_len: 1
+    expect_wx_max_len: 3
+    expect_tool_counts:
+      todo.done_current: 1
 
   - id: e03_noise_reply
     tier: simple

@@ -366,7 +366,7 @@ class TodoCoachMixin:
                 },
             )
         if not tasks:
-            await self.wx.send_text(
+            await self._todo_emit_reply(
                 "模板里没解析到可添加的待办项，请检查模板列表格式。", from_user, context_token
             )
             return True
@@ -392,7 +392,7 @@ class TodoCoachMixin:
         ack = base_ack
         if first_task:
             ack = f"{ack}\n先做：{first_task}，做完了吗？"
-        await self.wx.send_text(ack, from_user, context_token)
+        await self._todo_emit_reply(ack, from_user, context_token)
         return True
 
     async def _coach_done_current(
@@ -400,7 +400,7 @@ class TodoCoachMixin:
     ) -> bool:
         current_task = self._get_current_queue_task(from_user)
         if not current_task:
-            await self.wx.send_text(reply or "你现在没有进行中的待办。", from_user, context_token)
+            await self._todo_emit_reply(reply or "你现在没有进行中的待办。", from_user, context_token)
             return True
         state = self._todo_queues.get(from_user, {})
         total_count = len(state.get("tasks", []))
@@ -432,7 +432,7 @@ class TodoCoachMixin:
                 if progress_text
                 else f"✅ {current_task}完成。"
             )
-        await self.wx.send_text(done_reply, from_user, context_token)
+        await self._todo_emit_reply(done_reply, from_user, context_token)
         return True
 
     async def _coach_not_done(
@@ -444,7 +444,7 @@ class TodoCoachMixin:
             if current_task
             else "没问题，你先发几个待办我来排。"
         )
-        await self.wx.send_text(reply or fallback, from_user, context_token)
+        await self._todo_emit_reply(reply or fallback, from_user, context_token)
         return True
 
     async def _coach_next(
@@ -452,7 +452,7 @@ class TodoCoachMixin:
     ) -> bool:
         current_task = self._get_current_queue_task(from_user)
         fallback = f"你现在先做：{current_task}" if current_task else "当前没有进行中的短待办。"
-        await self.wx.send_text(reply or fallback, from_user, context_token)
+        await self._todo_emit_reply(reply or fallback, from_user, context_token)
         return True
 
     async def _coach_reorder(
@@ -461,13 +461,13 @@ class TodoCoachMixin:
         order = [str(t).strip() for t in (payload.get("reorder") or []) if str(t).strip()]
         remaining = self._get_remaining_queue_tasks(from_user)
         if not remaining or sorted(order) != sorted(remaining):
-            await self.wx.send_text(
+            await self._todo_emit_reply(
                 "顺序建议我收到了，但还不能安全改队列，请你再确认一次。", from_user, context_token
             )
             return True
         self._pending_reorders[from_user] = order
         ask = reply or f"我建议顺序：{' → '.join(order)}。按这个顺序更新吗？"
-        await self.wx.send_text(ask, from_user, context_token)
+        await self._todo_emit_reply(ask, from_user, context_token)
         return True
 
     async def _coach_reorder_confirm(
@@ -475,7 +475,7 @@ class TodoCoachMixin:
     ) -> bool:
         order = self._pending_reorders.get(from_user, [])
         if not order:
-            await self.wx.send_text(reply or "当前没有待确认的重排建议。", from_user, context_token)
+            await self._todo_emit_reply(reply or "当前没有待确认的重排建议。", from_user, context_token)
             return True
         self._set_todo_queue(from_user, order)
         self._pending_reorders.pop(from_user, None)
@@ -488,7 +488,7 @@ class TodoCoachMixin:
         confirm_reply = reply or "已按确认顺序更新。"
         if current_task:
             confirm_reply = f"{confirm_reply}\n先做：{current_task}，做完了吗？"
-        await self.wx.send_text(confirm_reply, from_user, context_token)
+        await self._todo_emit_reply(confirm_reply, from_user, context_token)
         return True
 
     async def _coach_skip_current(
@@ -496,12 +496,12 @@ class TodoCoachMixin:
     ) -> bool:
         state = self._todo_queues.get(from_user)
         if not state:
-            await self.wx.send_text(reply or "当前没有可跳过的待办。", from_user, context_token)
+            await self._todo_emit_reply(reply or "当前没有可跳过的待办。", from_user, context_token)
             return True
         tasks = state.get("tasks", [])
         idx = state.get("idx", 0)
         if idx >= len(tasks):
-            await self.wx.send_text(reply or "当前没有可跳过的待办。", from_user, context_token)
+            await self._todo_emit_reply(reply or "当前没有可跳过的待办。", from_user, context_token)
             return True
         self._pending_reorders.pop(from_user, None)
         skipped_task = tasks.pop(idx)
@@ -510,7 +510,7 @@ class TodoCoachMixin:
         skip_reply = reply or f"先跳过：{skipped_task}。"
         if next_task and next_task != skipped_task:
             skip_reply = f"{skip_reply}\n现在先做：{next_task}，做完了吗？"
-        await self.wx.send_text(skip_reply, from_user, context_token)
+        await self._todo_emit_reply(skip_reply, from_user, context_token)
         return True
 
     async def _coach_abandon_current(
@@ -518,12 +518,12 @@ class TodoCoachMixin:
     ) -> bool:
         state = self._todo_queues.get(from_user)
         if not state:
-            await self.wx.send_text(reply or "当前没有可放弃的待办。", from_user, context_token)
+            await self._todo_emit_reply(reply or "当前没有可放弃的待办。", from_user, context_token)
             return True
         tasks = state.get("tasks", [])
         idx = state.get("idx", 0)
         if idx >= len(tasks):
-            await self.wx.send_text(reply or "当前没有可放弃的待办。", from_user, context_token)
+            await self._todo_emit_reply(reply or "当前没有可放弃的待办。", from_user, context_token)
             return True
         self._pending_reorders.pop(from_user, None)
         abandoned_task = tasks.pop(idx)
@@ -536,7 +536,7 @@ class TodoCoachMixin:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
         if not tasks:
             self._todo_queues.pop(from_user, None)
-            await self.wx.send_text(
+            await self._todo_emit_reply(
                 reply or f"已放弃：{abandoned_task}。当前没有进行中的待办。", from_user, context_token
             )
             return True
@@ -544,7 +544,7 @@ class TodoCoachMixin:
         abandon_reply = reply or f"已放弃：{abandoned_task}。"
         if next_task:
             abandon_reply = f"{abandon_reply}\n现在先做：{next_task}，做完了吗？"
-        await self.wx.send_text(abandon_reply, from_user, context_token)
+        await self._todo_emit_reply(abandon_reply, from_user, context_token)
         return True
 
 

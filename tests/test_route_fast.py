@@ -48,6 +48,23 @@ def test_done_shortcut_when_active_queue():
     assert d["tool"] == TOOL_TODO_DONE_CURRENT
 
 
+def test_done_ok_lowercase_and_punct_when_active_queue():
+    q = _active_queue()
+    for s in ("ok", "Ok.", "OK！", "ｏｋ", "okk", "okay～"):
+        d = build_fast_unified_decision(s, "u1", q)
+        assert d is not None and d["tool"] == TOOL_TODO_DONE_CURRENT, s
+
+
+def test_done_ok_prefix_with_chinese_when_active_queue():
+    d = build_fast_unified_decision("ok就这样吧", "u1", _active_queue())
+    assert d is not None
+    assert d["tool"] == TOOL_TODO_DONE_CURRENT
+
+
+def test_done_ok_does_not_match_english_substring_took():
+    assert build_fast_unified_decision("took", "u1", _active_queue()) is None
+
+
 def test_done_shortcut_skips_negated_zuo_wan():
     """「还没做完」含子串「做完」，不得误触 done_current。"""
     assert build_fast_unified_decision("还没做完，等会再做", "u1", _active_queue()) is None

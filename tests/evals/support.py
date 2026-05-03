@@ -76,6 +76,7 @@ def merge_config_for_eval(tmp_vault_root: Path, loaded: dict | None) -> dict:
             "max_reply_length": 2000,
             "tool_progress_messages": False,
             "tool_progress_min_interval_sec": 0.8,
+            "tool_slow_hint_seconds": 0,
             "reply_on_record": True,
             "reply_on_error": True,
         },
@@ -222,6 +223,40 @@ def assert_case_expectations(case: dict[str, Any], result: dict) -> list[str]:
         blob = _joined_state_collected(result)
         if sub not in blob:
             failures.append(f"[{cid}] expect_state_contains substring missing: {sub!r}; state={blob!r}")
+
+    exp_dec_len = case.get("expect_decisions_len")
+    if exp_dec_len is not None:
+        decs = result.get("decisions_applied") or []
+        if not isinstance(decs, list):
+            decs = []
+        if len(decs) != int(exp_dec_len):
+            failures.append(
+                f"[{cid}] expect_decisions_len={exp_dec_len!r} got len={len(decs)!r} decs={decs!r}"
+            )
+
+    wx_max = case.get("expect_wx_max_len")
+    if wx_max is not None:
+        parts = result.get("wx_sent") or []
+        if not isinstance(parts, list):
+            parts = []
+        if len(parts) > int(wx_max):
+            failures.append(
+                f"[{cid}] expect_wx_max_len={wx_max!r} got len={len(parts)!r} wx={parts!r}"
+            )
+
+    tool_counts = case.get("expect_tool_counts")
+    if isinstance(tool_counts, dict):
+        decs = result.get("decisions_applied") or []
+        if not isinstance(decs, list):
+            decs = []
+        for tool_key, want in tool_counts.items():
+            got = sum(
+                1 for d in decs if isinstance(d, dict) and str(d.get("tool") or "") == str(tool_key)
+            )
+            if got != int(want):
+                failures.append(
+                    f"[{cid}] expect_tool_counts[{tool_key!r}]={want!r} got={got!r} decs={decs!r}"
+                )
 
     return failures
 

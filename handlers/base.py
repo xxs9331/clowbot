@@ -18,10 +18,11 @@ from utils.flow_log import log_flow_event, snapshot_todo_queue
 from utils.intent_bridge import intent_to_decision
 from utils.intent_llm import classify_intent
 from utils.route_fast import build_fast_unified_decision
+from utils.tool_names import TOOL_TODO_DONE_CURRENT
 from wechat.client import ClawBotClient
 
 from .coaches import RecordCoachMixin, RemindCoachMixin, TodoCoachMixin
-from .dispatcher import DispatcherMixin
+from .dispatcher import DispatcherMixin, _coalesce_unified_decision
 from .image import ImageMixin
 from .local_view import LocalViewMixin
 
@@ -75,6 +76,10 @@ class Handler(
         self._tool_status_last: dict[tuple[str, str], tuple[float, str]] = {}
         # 每用户结构化工作记忆：回答"现在在做什么"（跨消息持久）
         self._user_structured_state: dict[str, dict] = {}
+        # fast 路径 todo.done_current：抑制 coach 逐条回复，编排层发「处理中」+ 汇总
+        self._auto_advance_active: bool = False
+        self._auto_advance_results: list[str] = []
+        self._auto_advance_used_steps: int = 0
 
     def _context_spill_dir(self) -> Path:
         root = Path(self.cfg["vault"]["root"]).resolve()
@@ -140,6 +145,101 @@ class Handler(
         if detail:
             text = f"{text}\n{detail}"
         await self.wx.send_text(text, from_user, context_token)
+
+    def _auto_advance_append(self, line: str) -> None:
+        body = (line or "").strip()
+        if not body:
+            return
+        self._auto_advance_results.append(body)
+
+    def _auto_advance_begin(
+        self,
+        *,
+        from_user: str,
+        user_text: str,
+        msg_trace: str,
+        completed_preview: str,
+    ) -> None:
+        self._auto_advance_active = True
+        self._auto_advance_results = []
+        self._auto_advance_used_steps = 0
+        log_flow_event(
+            stage="route",
+            route="auto_advance_begin",
+            user_text=user_text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={
+                "trace": msg_trace,
+                "completed_preview": (completed_preview or "")[:120],
+                "queue": snapshot_todo_queue(self._todo_queues, from_user),
+            },
+        )
+
+    async def _auto_advance_finalize(
+        self,
+        *,
+        from_user: str,
+        context_token: str,
+        user_text: str,
+        msg_trace: str,
+        completed_label: str,
+        max_steps: int,
+        next_task: str,
+    ) -> None:
+        st_after = self._get_or_init_structured_state(from_user)
+        used = int(st_after.get("consecutive_auto_steps", 0) or 0)
+        self._auto_advance_used_steps = used
+        log_flow_event(
+            stage="route",
+            route="auto_advance_next_once",
+            user_text=user_text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={
+                "trace": msg_trace,
+                "next_preview": (next_task or "")[:120],
+                "read_only": True,
+            },
+        )
+        done_line = completed_label or "（当前项）"
+        next_block = f"- [ ] {next_task}" if next_task else "- 全部完成"
+        summary = (
+            f"✅ 连续处理完成（{used}/{max_steps} 步）\n\n"
+            f"已完成：\n- done: {done_line}\n\n"
+            f"下一个：\n{next_block}\n\n"
+            f"（步数限制: {max_steps}，已用 {used} 步）"
+        )
+        suppressed = list(self._auto_advance_results)
+        log_flow_event(
+            stage="route",
+            route="auto_advance_summary",
+            user_text=user_text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={
+                "trace": msg_trace,
+                "completed": done_line[:120],
+                "next_preview": (next_task or "")[:120],
+                "used_steps": used,
+                "max_steps": max_steps,
+                "suppressed": suppressed,
+            },
+        )
+        await self.wx.send_text(summary, from_user, context_token)
+        self._auto_advance_results = []
+
+    async def _todo_emit_reply(
+        self, text: str, from_user: str, context_token: str
+    ) -> None:
+        """待办 coach 统一出口：auto_advance 时只累积文本，由 _auto_advance_finalize 汇总。"""
+        body = (text or "").strip()
+        if not body:
+            return
+        if getattr(self, "_auto_advance_active", False):
+            self._auto_advance_append(body)
+            return
+        await self.wx.send_text(body, from_user, context_token)
 
     # ── 结构化工作记忆 state ──
 
@@ -783,18 +883,49 @@ class Handler(
                     "queue": snapshot_todo_queue(self._todo_queues, from_user),
                 },
             )
-            handled_fast = await self._apply_unified_decision(
-                fast_decision,
-                from_user,
-                context_token,
-                user_text=text,
-            )
+            ftool, _, _ = _coalesce_unified_decision(fast_decision)
+            auto_done = ftool == TOOL_TODO_DONE_CURRENT
+            completed_label = ""
+            if auto_done:
+                completed_label = self._get_current_queue_task(from_user)
+                self._auto_advance_begin(
+                    from_user=from_user,
+                    user_text=text,
+                    msg_trace=msg_trace,
+                    completed_preview=completed_label,
+                )
+                await self.wx.send_text("处理中…", from_user, context_token)
+            handled_fast = False
+            try:
+                handled_fast = await self._apply_unified_decision(
+                    fast_decision,
+                    from_user,
+                    context_token,
+                    user_text=text,
+                )
+            finally:
+                if auto_done:
+                    self._auto_advance_active = False
             self._update_structured_state(
                 from_user,
                 decision=fast_decision,
                 handled=handled_fast,
                 user_text=text,
             )
+            if auto_done:
+                next_task = self._get_current_queue_task(from_user)
+                if handled_fast:
+                    await self._auto_advance_finalize(
+                        from_user=from_user,
+                        context_token=context_token,
+                        user_text=text,
+                        msg_trace=msg_trace,
+                        completed_label=completed_label,
+                        max_steps=max_steps,
+                        next_task=next_task,
+                    )
+                else:
+                    self._auto_advance_results = []
             await self._maybe_checkpoint(from_user)
             log_flow_event(
                 stage="exit",
