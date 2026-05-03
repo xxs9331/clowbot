@@ -17,6 +17,7 @@ from acp.opencode_client import (
     todo_coach_skill_path,
 )
 from utils.log_sync import get_log_path
+from utils.section_reader import format_todo_checkbox_lines
 from utils.tool_names import (
     DOMAIN_RECORD,
     DOMAIN_REMIND,
@@ -93,15 +94,33 @@ def build_coach_write_prompt(
     meta = _DOMAIN_META[domain]
     skill_path = meta["skill_path_fn"](vault_root)
     today_log = str(get_log_path(vault_root, daily_log_dir))
+    payload_out: dict[str, Any] = dict(payload or {})
+    if domain == DOMAIN_TODO:
+        op = str(payload_out.get("op") or "")
+        if op == "rewrite_section_flat":
+            fo = payload_out.get("flat_order")
+            if isinstance(fo, list) and fo:
+                flat = [str(x).strip() for x in fo if str(x).strip()]
+                sug = format_todo_checkbox_lines(flat, done=False)
+                if sug:
+                    payload_out["suggested_todo_checkbox_lines"] = "\n".join(sug)
+        elif op == "merge_new_items":
+            items = payload_out.get("new_items_ordered")
+            if isinstance(items, list) and items:
+                flat = [str(x).strip() for x in items if str(x).strip()]
+                sug = format_todo_checkbox_lines(flat, done=False)
+                if sug:
+                    payload_out["suggested_todo_checkbox_lines"] = "\n".join(sug)
+
     envelope = {
         "tool": tool_id or meta["tool"],
         "skill_path": skill_path,
         "today_log": today_log,
-        "payload": payload,
+        "payload": payload_out,
         "output_contract": output_contract,
     }
     prefix = f"{system_prefix}\n\n" if system_prefix else ""
-    return (
+    body = (
         f"{prefix}"
         f"## ClawBot · {meta['label']} Vault 工具调用\n"
         "步骤：1) 用 fs/read_text_file 读取 `skill_path`（对应 SKILL 全文）。\n"
@@ -109,3 +128,17 @@ def build_coach_write_prompt(
         "3) 本消息中的 JSON 仅提供参数与输出格式，业务规则以 SKILL 为准。\n\n"
         f"```json\n{json.dumps(envelope, ensure_ascii=False, indent=2)}\n```\n"
     )
+    if domain == DOMAIN_TODO:
+        body += (
+            "\n### `## 📋 待办` 写盘排版（与 todo-coach 一致，须落实）\n"
+            "- 每行一条 `- [ ]` 或 `- [x]`；**同一行内**用中文逗号 `，` 串联至多 **5** 个子项（一组）。\n"
+            "- 整组完成再改为 `- [x]`，并在行末加 `✅HH:MM`（按 SKILL）。\n"
+            "- **禁止**把每个子项写成单独一行的 `- [ ] xxx`。\n"
+        )
+        sug = payload_out.get("suggested_todo_checkbox_lines")
+        if isinstance(sug, str) and sug.strip():
+            body += (
+                "- 本条 JSON 已含 `payload.suggested_todo_checkbox_lines`：写回时 **未完成部分须采用相同分行与逗号分组**"
+                "（可与文件中已有未完成行合并，但仍须遵守每组每行最多 5 项）。\n"
+            )
+    return body

@@ -9,6 +9,7 @@ import pytest
 
 from utils.section_reader import (
     extract_section_text,
+    format_todo_checkbox_lines,
     read_record_section,
     read_remind_section,
     read_todo_section,
@@ -43,6 +44,31 @@ def test_extract_section_text_h3_inside_does_not_break():
 def test_extract_section_text_missing_returns_empty():
     assert extract_section_text("# only title\n", "📋", "待办") == ""
     assert extract_section_text("", "📋", "待办") == ""
+
+
+def test_format_todo_checkbox_lines_five_then_rest():
+    labels = [str(i) for i in range(1, 8)]
+    lines = format_todo_checkbox_lines(labels, done=False, items_per_line=5)
+    assert lines == [
+        "- [ ] 1，2，3，4，5",
+        "- [ ] 6，7",
+    ]
+
+
+def test_format_todo_checkbox_lines_done_with_timestamp():
+    lines = format_todo_checkbox_lines(
+        ["a", "b"],
+        done=True,
+        completed_timestamp="18:55",
+    )
+    assert lines == ["- [x] a，b ✅18:55"]
+
+
+def test_format_todo_checkbox_lines_roundtrip_queue_flat():
+    lines = format_todo_checkbox_lines(["关机", "上厕所", "拿雨伞", "搬水桶", "吃药"], done=False)
+    md = "## 📋 待办\n" + "\n".join(lines) + "\n"
+    flat = read_todo_section(md)["queue_flat"]
+    assert flat == ["关机", "上厕所", "拿雨伞", "搬水桶", "吃药"]
 
 
 def test_read_todo_section_groups_and_queue_flat():

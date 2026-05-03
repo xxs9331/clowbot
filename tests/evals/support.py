@@ -12,6 +12,7 @@ import yaml
 
 from handlers import Handler
 from utils.log_sync import get_log_path
+from utils.section_reader import format_todo_checkbox_lines
 from utils.tool_names import TOOL_DECISION_NONE
 
 # tests/evals -> .clawbot 根
@@ -136,11 +137,17 @@ def ensure_minimal_today_log_for_eval(handler: Handler) -> None:
     if p.exists():
         return
     p.parent.mkdir(parents=True, exist_ok=True)
+    todo_lines = "\n".join(
+        format_todo_checkbox_lines(
+            ["eval 占位一", "占位二", "占位三", "占位四", "占位五"],
+            done=False,
+        )
+    )
     p.write_text(
         "## 📝 记录\n\n"
         "## ⏰ 提醒\n\n"
         "## 📋 待办\n"
-        "- [ ] eval 占位待办\n",
+        f"{todo_lines}\n",
         encoding="utf-8",
     )
 

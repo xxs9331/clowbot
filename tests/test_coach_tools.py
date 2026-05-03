@@ -51,6 +51,10 @@ def test_build_coach_write_prompt_three_domains(
     )
     assert "<SYSTEM_PREFIX>" in prompt
     assert expect_section in prompt
+    if domain == DOMAIN_TODO:
+        assert "至多 **5** 个子项" in prompt
+    else:
+        assert "至多 **5** 个子项" not in prompt
     env = _extract_envelope(prompt)
     assert env["tool"] == expect_tool
     assert env["payload"] == payload
@@ -59,6 +63,8 @@ def test_build_coach_write_prompt_three_domains(
     assert _FAKE_LOG_DIR.replace("/", "\\") in env["today_log"] or _FAKE_LOG_DIR in env[
         "today_log"
     ].replace("\\", "/")
+    if domain == DOMAIN_TODO:
+        assert "至多 **5** 个子项" in prompt
 
 
 def test_get_domain_tool_round_trip():
@@ -76,6 +82,35 @@ def test_unknown_domain_raises():
             daily_log_dir=_FAKE_LOG_DIR,
             payload={},
         )
+
+
+def test_todo_merge_payload_includes_suggested_checkbox_lines():
+    payload = {
+        "op": "merge_new_items",
+        "new_items_ordered": ["a", "b", "c", "d", "e", "f"],
+    }
+    prompt = build_coach_write_prompt(
+        DOMAIN_TODO,
+        vault_root=_FAKE_VAULT,
+        daily_log_dir=_FAKE_LOG_DIR,
+        payload=payload,
+    )
+    env = _extract_envelope(prompt)
+    sug = env["payload"].get("suggested_todo_checkbox_lines", "")
+    assert "- [ ] a，b，c，d，e" in sug
+    assert "- [ ] f" in sug
+
+
+def test_todo_rewrite_flat_payload_includes_suggested_lines():
+    payload = {"op": "rewrite_section_flat", "flat_order": ["写代码", "跑评测"]}
+    prompt = build_coach_write_prompt(
+        DOMAIN_TODO,
+        vault_root=_FAKE_VAULT,
+        daily_log_dir=_FAKE_LOG_DIR,
+        payload=payload,
+    )
+    env = _extract_envelope(prompt)
+    assert env["payload"]["suggested_todo_checkbox_lines"] == "- [ ] 写代码，跑评测"
 
 
 def test_custom_tool_id_overrides_default():

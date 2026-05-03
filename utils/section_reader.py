@@ -67,10 +67,48 @@ def extract_section_text(
 
 # ─── todo: ## 📋 待办 ───
 
+# 生活日志 `## 📋 待办`：每行一条 `- [ ]`/`- [x]`，行内用逗号串联至多若干个子项（与 todo-coach 一致）
+TODO_ITEMS_PER_LINE = 5
+
 # 行内时间戳（整组完成后）：✅HH:MM 或 ✅ HH:MM
 _TODO_TIMESTAMP_RE = re.compile(r"✅\s*(\d{1,2}:\d{2})")
 # 中文/英文逗号、顿号皆可作为子项分隔
 _TODO_ITEM_SPLIT_RE = re.compile(r"[，,、]")
+
+
+def format_todo_checkbox_lines(
+    labels: list[str],
+    *,
+    done: bool = False,
+    items_per_line: int = TODO_ITEMS_PER_LINE,
+    completed_timestamp: str | None = None,
+) -> list[str]:
+    """把扁平子项名格式化为待办节的 checklist 行（每行至多 `items_per_line` 项，中文逗号连接）。
+
+    与 `2-Areas/习惯养成/生活日志` 中手写习惯及 todo-coach「每行最多五项」一致。
+    """
+    n = int(items_per_line) if int(items_per_line) > 0 else TODO_ITEMS_PER_LINE
+    clean = [str(x).strip() for x in labels if str(x).strip()]
+    if not clean:
+        return []
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    for x in clean:
+        if len(cur) >= n:
+            chunks.append(cur)
+            cur = []
+        cur.append(x)
+    if cur:
+        chunks.append(cur)
+    mark = "x" if done else " "
+    lines: list[str] = []
+    for chunk in chunks:
+        body = "，".join(chunk)
+        line = f"- [{mark}] {body}"
+        if done and completed_timestamp:
+            line += f" ✅{completed_timestamp}"
+        lines.append(line)
+    return lines
 
 
 def _split_todo_subitems(payload: str) -> list[str]:
