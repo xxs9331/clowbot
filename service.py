@@ -18,12 +18,10 @@
 import os
 import sys
 import asyncio
-import logging
 import servicemanager
 import win32serviceutil
 import win32service
 import win32event
-import win32process
 
 
 # ─── 服务配置 ───
@@ -47,13 +45,25 @@ class ClawBotService(win32serviceutil.ServiceFramework):
         self._task = None
 
     def SvcStop(self):
-        """服务停止时调用"""
+        """SCM 在另一线程调用；禁止用 _loop.is_running()（在 SCM 线程里几乎恒为 False，导致从不 cancel，永远 STOP_PENDING）。"""
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
-        if self._loop and self._loop.is_running():
-            # 通过事件通知主循环退出
-            win32event.SetEvent(self.hWaitStop)
-            if self._task and not self._task.done():
-                self._task.cancel()
+        win32event.SetEvent(self.hWaitStop)
+        loop = self._loop
+        if loop is None:
+            return
+
+        def _request_cancel():
+            try:
+                t = self._task
+                if t is not None and not t.done():
+                    t.cancel()
+            except Exception:
+                pass
+
+        try:
+            loop.call_soon_threadsafe(_request_cancel)
+        except RuntimeError:
+            pass
 
     def SvcDoRun(self):
         """服务启动时调用"""

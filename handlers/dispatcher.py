@@ -38,6 +38,22 @@ from utils.tool_names import (
 # 16K 字符量级：明显长于常见微信单条，又避免极端超长占用内存/日志。
 UNIFIED_LEGACY_RAW_FALLBACK_MAX_CHARS = 16384
 
+# 跟进时间短句（如「中午一点吧」）：含时间词且整体较短则暴露 remind.add，无需跨轮状态。
+_CANDIDATE_TIME_HINT_RE = re.compile(
+    r"\d{1,2}[:：]\d{2}|[0-9零一两三四五六七八九十]+点|中午|下午|晚上|上午"
+)
+
+# tool=none 且 structured 多轮重试后：这些子串易与「已执行写入」混淆，需加免责提示。
+_FALSE_EXEC_REPLY_MARKERS = (
+    "已记下",
+    "记下了",
+    "设好了",
+    "已经帮你",
+    "帮你设好",
+    "真记上",
+    "补记",
+)
+
 
 def _coalesce_unified_decision(decision: dict) -> tuple[str, dict[str, Any], str]:
     """LLM JSON -> (tool, payload, reply)。
@@ -161,6 +177,8 @@ class DispatcherMixin:
                     TOOL_TODO_ABANDON_CURRENT,
                 ]
             )
+        if len(t) < 20 and _CANDIDATE_TIME_HINT_RE.search(t):
+            out.append(TOOL_REMIND_ADD)
         # 保序去重
         seen = set()
         uniq: list[str] = []
@@ -322,13 +340,30 @@ class DispatcherMixin:
         )
 
     @staticmethod
-    def _sanitize_vague_none_reply(reply: str, tool: str) -> str:
+    def _sanitize_vague_none_reply(
+        reply: str,
+        tool: str,
+        *,
+        structured_trace: dict | None = None,
+    ) -> str:
         """tool=none 时：承接语但无列表/提交号等证据则补一句可追问提示。"""
         if tool != TOOL_DECISION_NONE:
             return reply
         t = (reply or "").strip()
         if not t:
             return reply
+        attempts = 1
+        if isinstance(structured_trace, dict):
+            with suppress(Exception):
+                attempts = int(structured_trace.get("structured_attempts") or 1)
+        if attempts > 1 and any(m in t for m in _FALSE_EXEC_REPLY_MARKERS):
+            guard_phrase = "系统侧未确认写入"
+            if guard_phrase not in t:
+                return (
+                    t
+                    + "\n（本轮模型输出经过重试；若你本来要「加提醒」但系统侧未确认写入，"
+                    "请再发一条完整提醒句，例如「明天 13:00 提醒我拿快递」。）"
+                )
         if not any(
             x in t
             for x in OpenCodeACP._STRUCTURED_VAGUE_REFERENCE_SUBSTRINGS
@@ -461,7 +496,7 @@ class DispatcherMixin:
         if isinstance(decision, dict):
             trace = decision.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
             tool, payload, reply = _coalesce_unified_decision(decision)
-            reply = self._sanitize_vague_none_reply(reply, tool)
+            reply = self._sanitize_vague_none_reply(reply, tool, structured_trace=trace)
             if reply and max_rl > 0 and len(reply) > max_rl:
                 reply = reply[:max_rl]
             log_flow_event(
@@ -501,7 +536,7 @@ class DispatcherMixin:
             )
             reply = ""
             if spill and tool == TOOL_DECISION_NONE:
-                reply = self._sanitize_vague_none_reply(spill, tool)
+                reply = self._sanitize_vague_none_reply(spill, tool, structured_trace=trace)
             else:
                 try:
                     reply = await self._llm_generate_unified_reply(
@@ -518,7 +553,7 @@ class DispatcherMixin:
                         extra={"error": str(e)[:200], "tool": tool},
                     )
                     reply = ""
-            reply = self._sanitize_vague_none_reply(reply, tool)
+            reply = self._sanitize_vague_none_reply(reply, tool, structured_trace=trace)
             if reply and max_rl > 0 and len(reply) > max_rl:
                 reply = reply[:max_rl]
             return {"tool": tool, "payload": payload, "reply": reply}

@@ -171,7 +171,7 @@ async def classify_intent(
     text: str,
     queue_state: dict | None = None,
     memory_context: str | None = None,
-    timeout: float = 12.0,
+    timeout: float = 5.0,
     from_user: str = "",
 ) -> dict | None:
     """对自然语言做意图分类。失败一律返回 None，调用方自行兜底。

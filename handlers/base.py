@@ -15,8 +15,6 @@ from utils.intent import (
     detect_intent,
 )
 from utils.flow_log import log_flow_event, snapshot_todo_queue
-from utils.intent_bridge import intent_to_decision
-from utils.intent_llm import classify_intent
 from utils.route_fast import build_fast_unified_decision
 from utils.tool_names import TOOL_TODO_DONE_CURRENT
 from wechat.client import ClawBotClient
@@ -63,6 +61,7 @@ class Handler(
         self.todo_session_id: str = ""
         self.record_session_id: str = ""
         self.remind_session_id: str = ""
+        self.agent_session_id: str = ""
         self.debug_session_id: str = ""  # 调试模型专用 session
         self._reminded_ids: set[str] = set()
         self._reminder_refresh: asyncio.Event = asyncio.Event()
@@ -80,6 +79,149 @@ class Handler(
         self._auto_advance_active: bool = False
         self._auto_advance_results: list[str] = []
         self._auto_advance_used_steps: int = 0
+        # agent permission 挂起：每用户仅维护一个待确认请求（v1）
+        self._pending_agent_permission: dict[str, int] = {}
+        if hasattr(self.acp, "set_permission_request_handler"):
+            self.acp.set_permission_request_handler(self._on_acp_permission_request)
+
+    def _wx_agent_allowlist(self) -> set[str]:
+        bot_cfg = self.cfg.get("bot") or {}
+        raw = bot_cfg.get("wx_agent_allowlist")
+        if isinstance(raw, str):
+            return {x.strip() for x in raw.split(",") if x.strip()}
+        if isinstance(raw, list):
+            return {str(x).strip() for x in raw if str(x).strip()}
+        return set()
+
+    def _is_wx_agent_user(self, from_user: str) -> bool:
+        allow = self._wx_agent_allowlist()
+        if not allow:
+            return False
+        return "*" in allow or from_user in allow
+
+    async def _on_acp_permission_request(self, req: dict) -> str:
+        """ACP 权限请求回调：agent session 一律挂起待微信确认，其它会话自动批准。"""
+        session_id = str(req.get("session_id") or "")
+        if not session_id or session_id != self.agent_session_id:
+            return "approved"
+        ctx = req.get("context") if isinstance(req.get("context"), dict) else {}
+        from_user = str(ctx.get("from_user") or "").strip()
+        if not from_user:
+            return "denied"
+        request_id = int(req.get("request_id") or 0)
+        if request_id <= 0:
+            return "denied"
+        self._pending_agent_permission[from_user] = request_id
+        summary = str(req.get("params_summary") or "").strip()[:500]
+        await self.wx.send_text(
+            "检测到高权限操作申请，是否继续？\n"
+            f"request_id={request_id}\n"
+            f"摘要：{summary}\n\n"
+            "回复「确认」继续，回复「取消」拒绝。",
+            from_user,
+            str(ctx.get("context_token") or ""),
+        )
+        log_flow_event(
+            stage="route",
+            route="agent_permission_pending",
+            user_text="",
+            from_user=from_user,
+            session_id=session_id,
+            extra={"request_id": request_id, "summary": summary},
+        )
+        return "defer"
+
+    @staticmethod
+    def _is_confirm_reply(text: str) -> bool:
+        t = (text or "").strip().lower()
+        return t in {"确认", "同意", "ok", "yes", "y", "继续"}
+
+    @staticmethod
+    def _is_cancel_reply(text: str) -> bool:
+        t = (text or "").strip().lower()
+        return t in {"取消", "拒绝", "no", "n", "停", "停止"}
+
+    async def _maybe_handle_agent_permission_reply(
+        self, text: str, from_user: str, context_token: str
+    ) -> bool:
+        request_id = self._pending_agent_permission.get(from_user)
+        if not request_id:
+            return False
+        if not hasattr(self.acp, "has_pending_permission_request") or not hasattr(
+            self.acp, "resolve_permission_request"
+        ):
+            self._pending_agent_permission.pop(from_user, None)
+            return False
+        if not self.acp.has_pending_permission_request(request_id):
+            self._pending_agent_permission.pop(from_user, None)
+            return False
+        if self._is_confirm_reply(text):
+            ok = self.acp.resolve_permission_request(request_id, approved=True)
+            self._pending_agent_permission.pop(from_user, None)
+            await self.wx.send_text(
+                "已确认，继续执行。",
+                from_user,
+                context_token,
+            )
+            log_flow_event(
+                stage="route",
+                route="agent_permission_resolved",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.agent_session_id,
+                extra={"request_id": request_id, "approved": bool(ok)},
+            )
+            return True
+        if self._is_cancel_reply(text):
+            ok = self.acp.resolve_permission_request(request_id, approved=False)
+            self._pending_agent_permission.pop(from_user, None)
+            await self.wx.send_text(
+                "已取消本次高权限操作。",
+                from_user,
+                context_token,
+            )
+            log_flow_event(
+                stage="route",
+                route="agent_permission_resolved",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.agent_session_id,
+                extra={"request_id": request_id, "approved": False, "resolved": bool(ok)},
+            )
+            return True
+        return False
+
+    async def _handle_wx_opencode_agent(
+        self, *, from_user: str, text: str, context_token: str, msg_trace: str
+    ) -> bool:
+        if not self.agent_session_id:
+            return False
+        log_flow_event(
+            stage="route",
+            route="wx_agent_enter",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.agent_session_id,
+            extra={"trace": msg_trace},
+        )
+        reply, _ = await self.acp.prompt(
+            self.agent_session_id,
+            text,
+            trace_tag="wx_agent_turn",
+            session_context={"from_user": from_user, "context_token": context_token},
+        )
+        body = (reply or "").strip()
+        if body:
+            await self.wx.send_text(body, from_user, context_token)
+        log_flow_event(
+            stage="exit",
+            route="wx_agent_turn",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.agent_session_id,
+            extra={"trace": msg_trace, "has_reply": bool(body)},
+        )
+        return bool(body)
 
     def _context_spill_dir(self) -> Path:
         root = Path(self.cfg["vault"]["root"]).resolve()
@@ -560,6 +702,12 @@ class Handler(
         self.todo_session_id = await self.acp.create_session()
         self.record_session_id = await self.acp.create_session()
         self.remind_session_id = await self.acp.create_session()
+        if self._wx_agent_allowlist():
+            bot_cfg = self.cfg.get("bot") or {}
+            agent_model = (bot_cfg.get("agent_model") or "").strip()
+            self.agent_session_id = await self.acp.create_session(agent_model or None)
+        else:
+            self.agent_session_id = ""
 
         # 调试模式：额外创建一个 debug session，使用 debug model
         agent_cfg = self.cfg.get("agent") or {}
@@ -613,11 +761,22 @@ class Handler(
 
         # 兼容旧字段：默认代表 unified 会话
         self.session_id = self.unified_session_id
+        if hasattr(self.acp, "set_session_permission_mode"):
+            self.acp.set_session_permission_mode(self.unified_session_id, "auto")
+            self.acp.set_session_permission_mode(self.todo_session_id, "auto")
+            self.acp.set_session_permission_mode(self.record_session_id, "auto")
+            self.acp.set_session_permission_mode(self.remind_session_id, "auto")
         parts = [
             f"unified={self.unified_session_id} todo={self.todo_session_id}",
             f"record={self.record_session_id} remind={self.remind_session_id}",
         ]
+        if self.agent_session_id:
+            if hasattr(self.acp, "set_session_permission_mode"):
+                self.acp.set_session_permission_mode(self.agent_session_id, "confirm")
+            parts.append(f"agent={self.agent_session_id}")
         if self.debug_session_id:
+            if hasattr(self.acp, "set_session_permission_mode"):
+                self.acp.set_session_permission_mode(self.debug_session_id, "auto")
             parts.append(f"debug={self.debug_session_id}")
         print(f"[Bot] sessions: {' '.join(parts)}")
 
@@ -938,98 +1097,27 @@ class Handler(
             if handled_fast:
                 return
 
-        # ─── 小模型意图分类兜底（只在规则/fast 都未命中时触发）───
-        oc_cfg = self.cfg.get("opencode", {}) or {}
-        high_th = float(oc_cfg.get("intent_threshold_high", 0.8) or 0.8)
-        mid_th = float(oc_cfg.get("intent_threshold_mid", 0.5) or 0.5)
-        intent_model = oc_cfg.get("intent_model") or None
-        queue_state = snapshot_todo_queue(self._todo_queues, from_user)
-        mem_block = self._intent_classifier_memory_block(from_user)
-        intent_obj = await classify_intent(
-            self.acp,
-            model=intent_model,
-            text=text,
-            queue_state=queue_state,
-            memory_context=mem_block or None,
-            from_user=from_user,
-        )
-        intent_hint = None
-        if intent_obj:
-            conf = float(intent_obj.get("confidence", 0.0))
-            log_flow_event(
-                stage="route",
-                route="intent_llm",
-                user_text=text,
+        if self._is_wx_agent_user(from_user):
+            handled_agent = await self._handle_wx_opencode_agent(
                 from_user=from_user,
-                session_id=self.session_id,
-                extra={
-                    "trace": msg_trace,
-                    "intent": intent_obj.get("intent"),
-                    "slots": intent_obj.get("slots", {}),
-                    "confidence": conf,
-                    "queue": queue_state,
-                },
+                text=text,
+                context_token=context_token,
+                msg_trace=msg_trace,
             )
-            if conf >= high_th:
-                decision = intent_to_decision(intent_obj)
-                if decision and self._block_intent_short_circuit(intent_obj, text, oc_cfg):
-                    log_flow_event(
-                        stage="route",
-                        route="intent_high_deferred",
-                        user_text=text,
-                        from_user=from_user,
-                        session_id=self.session_id,
-                        extra={
-                            "trace": msg_trace,
-                            "intent": intent_obj.get("intent"),
-                            "confidence": conf,
-                        },
-                    )
-                    decision = None
-                if decision:
-                    handled_sm = await self._apply_unified_decision(
-                        decision,
-                        from_user,
-                        context_token,
-                        user_text=text,
-                    )
-                    self._update_structured_state(
-                        from_user,
-                        decision=decision,
-                        handled=handled_sm,
-                        user_text=text,
-                    )
-                    await self._maybe_checkpoint(from_user)
-                    log_flow_event(
-                        stage="exit",
-                        route="intent_llm",
-                        user_text=text,
-                        from_user=from_user,
-                        session_id=self.session_id,
-                        extra={
-                            "trace": msg_trace,
-                            "handled": handled_sm,
-                            "intent_source": "small_model",
-                            "intent_confidence": conf,
-                            "intent_slots": intent_obj.get("slots", {}),
-                            "decision": decision,
-                        },
-                    )
-                    if handled_sm:
-                        return
-            if conf >= mid_th:
-                intent_hint = intent_obj
+            if handled_agent:
+                return
 
+        queue_state = snapshot_todo_queue(self._todo_queues, from_user)
         log_flow_event(
             stage="route",
             route="llm_unified_enter",
             user_text=text,
             from_user=from_user,
             session_id=self.session_id,
-            extra={"trace": msg_trace, "queue": queue_state, "intent_hint": intent_hint},
+            extra={"trace": msg_trace, "queue": queue_state},
         )
         decision = await self._llm_unified_decide(
-            from_user, text, intent_hint=intent_hint
+            from_user, text, intent_hint=None
         )
         handled = await self._apply_unified_decision(
             decision,
@@ -1055,7 +1143,6 @@ class Handler(
                 "handled": handled,
                 "decision": decision,
                 "intent_source": "unified",
-                "intent_hint": intent_hint,
             },
         )
         if handled:
@@ -1116,7 +1203,6 @@ class Handler(
                 "intent": intent,
                 "intent_data": data,
                 "intent_source": "safe_fallback",
-                "intent_hint": intent_hint,
             },
         )
         if getattr(self, "_eval_mode", False):
@@ -1141,6 +1227,9 @@ class Handler(
             return
 
         if not text:
+            return
+
+        if await self._maybe_handle_agent_permission_reply(text, from_user, context_token):
             return
 
         # 个人使用不发斜杠命令；以 / 开头的统一忽略，避免被 LLM 当成自然语言乱解释。

@@ -10,11 +10,13 @@ opencode:
   max_tokens: 4096
   model: "deepseek/deepseek-v4-flash"        # 默认文本模型
   multimodal_model: "alibaba-cn/qwen3-vl-plus"   # 多模态（图片）模型
+  mcp_servers: []  # 可选：透传到 session/new 的 MCP servers（结构同 OpenCode）
 
-  # 意图小模型（兜底层；缺省 = 主 model）
-  intent_model: "alibaba-cn/qwen3.5-flash"
-  intent_threshold_high: 0.8   # >= high → 直接 dispatcher
-  intent_threshold_mid: 0.5    # >= mid && < high → 作 hint 给 unified；< mid → safe_fallback
+  # 意图小模型（历史字段）：Handler 主链路已不再读取；可删可留，不影响运行。
+  # 聊天路由：detect_intent / 快通道 → unified 决策。
+  # intent_model: "alibaba-cn/qwen3.5-flash"
+  # intent_threshold_high: 0.8
+  # intent_threshold_mid: 0.5
 
 # ─── Vault 路径 ───
 vault:
@@ -36,3 +38,5 @@ bot:
   reply_on_error: true           # 出错时告知用户
   typing_indicator: true         # 处理中显示"正在输入"
   max_reply_length: 2000         # 回复最大长度（微信限制）
+  wx_agent_allowlist: ["*"]  # 或具体 wxid
+  agent_model: ""  # 为空则沿用 opencode.model

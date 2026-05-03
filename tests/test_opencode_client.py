@@ -150,6 +150,79 @@ def test_prompt_structured_merges_best_effort_when_final_vague():
     assert "merged" in tr["final_reply_source"]
 
 
+def test_prompt_structured_recovers_tool_payload_when_reply_truncated():
+    """reply 被截断导致整段 JSON 非法时，仍可从原文恢复 remind.add + payload。"""
+    acp = OpenCodeACP()
+    broken = (
+        '{"tool":"remind.add","payload":{"text":"下班回家","hhmm":"22:00",'
+        '"event_date":"2026-05-03"},"reply":"好嘞 十点叫你'
+    )
+
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+        return broken, ""
+
+    acp.prompt = _stub_prompt  # type: ignore[method-assign]
+    schema = {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": ["none", "remind.add"]},
+            "payload": {"type": "object"},
+            "reply": {"type": "string"},
+        },
+        "required": ["tool", "payload", "reply"],
+        "additionalProperties": False,
+    }
+    out = asyncio.run(
+        acp.prompt_structured(
+            "sid",
+            "msg",
+            json_schema=schema,
+            retry_count=1,
+            trace_tag="unified_decide_combined",
+        )
+    )
+    assert out["tool"] == "remind.add"
+    assert out["payload"]["hhmm"] == "22:00"
+    assert out["payload"]["text"] == "下班回家"
+
+
+def test_prompt_structured_never_merges_reasoning_into_reply():
+    """即便 reasoning 含自然语言，也不能拼进用户可见 reply。"""
+    acp = OpenCodeACP()
+    final = '{"tool":"none","payload":{},"reply":"哟 爸爸终于来啦\\n今天有啥吩咐没"}'
+    reasoning = (
+        'The user message is "你好" (hello). This is a simple greeting/chat.\n'
+        "So I should select none."
+    )
+
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+        return final, reasoning
+
+    acp.prompt = _stub_prompt  # type: ignore[method-assign]
+    schema = {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": ["none"]},
+            "payload": {"type": "object"},
+            "reply": {"type": "string"},
+        },
+        "required": ["tool", "payload", "reply"],
+        "additionalProperties": False,
+    }
+    out = asyncio.run(
+        acp.prompt_structured(
+            "sid",
+            "msg",
+            json_schema=schema,
+            retry_count=1,
+            trace_tag="unified_decide_combined",
+        )
+    )
+    assert out["tool"] == "none"
+    assert out["reply"] == "哟 爸爸终于来啦\n今天有啥吩咐没"
+    assert "The user message is" not in out["reply"]
+
+
 def test_sanitize_vague_none_reply_appends_hint_when_no_evidence():
     from handlers.dispatcher import DispatcherMixin
 
@@ -159,3 +232,101 @@ def test_sanitize_vague_none_reply_appends_hint_when_no_evidence():
     assert "`9417ccd`" in DispatcherMixin._sanitize_vague_none_reply(
         "刚列过\n- `9417ccd` feat: x", "none"
     )
+
+
+def test_collect_prompt_response_handles_agent_requests():
+    acp = OpenCodeACP()
+    seen: list[dict] = []
+
+    async def _stub_handle(msg):
+        seen.append(msg)
+
+    acp._handle_agent_request = _stub_handle  # type: ignore[method-assign]
+    async def _run():
+        await acp._response_queue.put(
+            {"jsonrpc": "2.0", "id": 7, "method": "fs/list_directory", "params": {"path": "."}}
+        )
+        await acp._response_queue.put(
+            {"jsonrpc": "2.0", "id": 99, "result": {"parts": [{"type": "text", "text": "ok"}]}}
+        )
+        return await acp._collect_prompt_response(99, session_id="sid", timeout=2)
+
+    out = asyncio.run(_run())
+    assert out["saw_final_response"] is True
+    assert len(seen) == 1
+    assert seen[0]["method"] == "fs/list_directory"
+
+
+def test_permission_confirm_mode_waits_for_resolution():
+    acp = OpenCodeACP()
+    acp.set_session_permission_mode("sid-agent", "confirm")
+    acp.set_session_context("sid-agent", {"from_user": "u1"})
+
+    writes: list[dict] = []
+    acp._write = lambda msg: writes.append(msg)  # type: ignore[method-assign]
+
+    async def _stub_handler(_req):
+        return "defer"
+
+    acp.set_permission_request_handler(_stub_handler)
+
+    async def _run():
+        t = asyncio.create_task(
+            acp._handle_agent_request(
+                {
+                    "id": 321,
+                    "method": "session/request_permission",
+                    "params": {"sessionId": "sid-agent", "reason": "danger"},
+                }
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert acp.has_pending_permission_request(321) is True
+        assert acp.resolve_permission_request(321, approved=True) is True
+        await t
+
+    asyncio.run(_run())
+    assert writes[-1]["id"] == 321
+    assert writes[-1]["result"]["outcome"]["outcome"] == "approved"
+
+
+def test_create_session_passes_configured_mcp_servers():
+    acp = OpenCodeACP(mcp_servers=[{"name": "demo"}])
+    seen: list[dict] = []
+
+    async def _stub_send_and_recv(method, params=None, timeout=120):  # noqa: ARG001
+        seen.append({"method": method, "params": params})
+        if method == "session/new":
+            return {"result": {"sessionId": "sid-x"}}
+        return {"result": {}}
+
+    async def _stub_set_model(_sid, _model):
+        return None
+
+    acp._send_and_recv = _stub_send_and_recv  # type: ignore[method-assign]
+    acp._set_model = _stub_set_model  # type: ignore[method-assign]
+    sid = asyncio.run(acp.create_session())
+    assert sid == "sid-x"
+    assert seen[0]["method"] == "session/new"
+    assert seen[0]["params"]["mcpServers"] == [{"name": "demo"}]
+
+
+def test_create_session_passes_configured_mcp_servers():
+    acp = OpenCodeACP(mcp_servers=[{"name": "demo"}])
+    seen: list[dict] = []
+
+    async def _stub_send_and_recv(method, params=None, timeout=120):  # noqa: ARG001
+        seen.append({"method": method, "params": params})
+        if method == "session/new":
+            return {"result": {"sessionId": "sid-x"}}
+        return {"result": {}}
+
+    async def _stub_set_model(_sid, _model):
+        return None
+
+    acp._send_and_recv = _stub_send_and_recv  # type: ignore[method-assign]
+    acp._set_model = _stub_set_model  # type: ignore[method-assign]
+    sid = asyncio.run(acp.create_session())
+    assert sid == "sid-x"
+    assert seen[0]["method"] == "session/new"
+    assert seen[0]["params"]["mcpServers"] == [{"name": "demo"}]

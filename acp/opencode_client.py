@@ -18,7 +18,8 @@ import subprocess
 from pathlib import Path
 import time
 import threading
-from typing import Optional, Callable
+from collections import deque
+from typing import Any, Awaitable, Optional, Callable
 
 from utils.flow_log import log_acp_turn, log_flow_event
 
@@ -34,6 +35,7 @@ class OpenCodeACP:
         hostname: str = "127.0.0.1",
         model: str = DEFAULT_MODEL,
         max_tokens: int = 4096,
+        mcp_servers: list[dict] | None = None,
         *,
         reply_merge_enabled: bool = True,
     ):
@@ -43,16 +45,32 @@ class OpenCodeACP:
         self.model = model
         self.multimodal_model = MULTIMODAL_MODEL
         self.max_tokens = int(max_tokens) if max_tokens else 0
+        self.mcp_servers = list(mcp_servers or [])
         self.reply_merge_enabled = bool(reply_merge_enabled)
         self._proc: Optional[subprocess.Popen] = None
         self._msg_id = 0
         self._reader_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
+        self._stderr_lock = threading.Lock()
         self._running = False
         # 响应和通知队列
         self._response_queue = asyncio.Queue()
+        # 收集阶段「误读」的下一帧信令放回队首，供下一次 recv 或下一轮 prompt 消费（单连接 JSON-RPC 保序）
+        self._recollect_buf: deque = deque()
         self._notification_handler: Optional[Callable] = None
         # 单通道 JSON-RPC：同一时刻仅允许一个 in-flight 请求消费队列，避免串包
         self._rpc_lock = asyncio.Lock()
+        # session 粒度权限模式：auto | confirm（默认 auto）
+        self._session_permission_mode: dict[str, str] = {}
+        # session 运行时上下文（如 from_user），供 permission 回调使用
+        self._session_context: dict[str, dict[str, Any]] = {}
+        # 待确认的 permission 请求：request_id -> {"future", ...}
+        self._pending_permission_requests: dict[int, dict[str, Any]] = {}
+        # 外部回调：用于把高危 permission 请求转给业务层（如微信确认）
+        self._permission_request_handler: Optional[
+            Callable[[dict[str, Any]], Awaitable[str] | str]
+        ] = None
+        self._permission_wait_timeout_sec: float = 300.0
 
     def _build_prompt_params(self, session_id: str, prompt_parts: list[dict]) -> dict:
         params = {
@@ -110,7 +128,21 @@ class OpenCodeACP:
         )
         await asyncio.sleep(2)
         if self._proc.poll() is not None:
-            raise RuntimeError(f"opencode acp exited: {self._proc.stderr.read()[:500]}")
+            err_tail = ""
+            if self._proc.stderr:
+                try:
+                    err_tail = self._proc.stderr.read()[:500]
+                except Exception:
+                    err_tail = ""
+            raise RuntimeError(f"opencode acp exited: {err_tail}")
+
+        # stderr 必须持续排空：PIPE 无人读时子进程写满会阻塞，服务模式下无 TTY 更易触发（stdout 永远无 JSON）
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_drain_loop,
+            daemon=True,
+            name="acp-stderr",
+        )
+        self._stderr_thread.start()
 
         # 开始读线程
         self._running = True
@@ -154,6 +186,31 @@ class OpenCodeACP:
 
     # ─── 内部通信 ───
 
+    def _stderr_drain_loop(self):
+        """Drain opencode stderr into logs so the PIPE never fills and blocks the child."""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        log_path = Path(__file__).resolve().parent.parent / "logs" / "acp-stderr.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as lf:
+                while True:
+                    try:
+                        line = proc.stderr.readline()
+                    except Exception:
+                        break
+                    if not line:
+                        break
+                    with self._stderr_lock:
+                        lf.write(line)
+                        lf.flush()
+        except Exception:
+            pass
+
     def _reader_loop(self):
         """后台线程：不断读取 stdout，分发到 asyncio.Queue"""
         while self._running and self._proc and self._proc.poll() is None:
@@ -174,14 +231,72 @@ class OpenCodeACP:
             except Exception:
                 pass
 
-    def _handle_agent_request(self, msg: dict):
-        """处理 agent→client 的请求（fs操作、权限审批等）"""
-        method = msg.get("method", "")
-        msg_id = msg.get("id")
-        params = msg.get("params", {})
+    def set_session_permission_mode(self, session_id: str, mode: str) -> None:
+        m = (mode or "").strip().lower()
+        self._session_permission_mode[session_id] = "confirm" if m == "confirm" else "auto"
 
-        if method == "session/request_permission":
-            # 自动批准所有权限请求
+    def set_session_context(self, session_id: str, context: dict[str, Any] | None) -> None:
+        if not session_id:
+            return
+        self._session_context[session_id] = dict(context or {})
+
+    def set_permission_request_handler(
+        self, handler: Optional[Callable[[dict[str, Any]], Awaitable[str] | str]]
+    ) -> None:
+        self._permission_request_handler = handler
+
+    def has_pending_permission_request(self, request_id: int) -> bool:
+        return int(request_id) in self._pending_permission_requests
+
+    def resolve_permission_request(self, request_id: int, *, approved: bool) -> bool:
+        rid = int(request_id)
+        pending = self._pending_permission_requests.get(rid)
+        if not pending:
+            return False
+        fut = pending.get("future")
+        if not isinstance(fut, asyncio.Future) or fut.done():
+            return False
+        fut.set_result("approved" if approved else "denied")
+        return True
+
+    @staticmethod
+    def _extract_session_id_from_params(params: dict) -> str:
+        if not isinstance(params, dict):
+            return ""
+        sid = (
+            params.get("sessionId")
+            or params.get("session_id")
+            or params.get("id")
+            or ""
+        )
+        if sid:
+            return str(sid)
+        # 部分实现会把 session 信息嵌在 request/target 中
+        for key in ("request", "target", "metadata"):
+            child = params.get(key)
+            if isinstance(child, dict):
+                sid2 = (
+                    child.get("sessionId")
+                    or child.get("session_id")
+                    or child.get("id")
+                    or ""
+                )
+                if sid2:
+                    return str(sid2)
+        return ""
+
+    @staticmethod
+    def _summarize_permission_params(params: dict) -> str:
+        try:
+            raw = json.dumps(params or {}, ensure_ascii=False)
+        except Exception:
+            raw = str(params)
+        return raw[:800]
+
+    async def _handle_permission_request(self, msg_id: int, params: dict):
+        session_id = self._extract_session_id_from_params(params)
+        mode = self._session_permission_mode.get(session_id, "auto")
+        if mode != "confirm":
             self._write(
                 {
                     "jsonrpc": "2.0",
@@ -189,6 +304,164 @@ class OpenCodeACP:
                     "result": {"outcome": {"outcome": "approved"}},
                 }
             )
+            return
+
+        context = dict(self._session_context.get(session_id) or {})
+        req = {
+            "request_id": msg_id,
+            "session_id": session_id,
+            "mode": mode,
+            "params": params or {},
+            "params_summary": self._summarize_permission_params(params or {}),
+            "context": context,
+        }
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._pending_permission_requests[msg_id] = {
+            **req,
+            "future": fut,
+            "created_at": time.time(),
+        }
+        decision = "defer"
+        cb = self._permission_request_handler
+        if callable(cb):
+            try:
+                maybe = cb(req)
+                decision = await maybe if asyncio.iscoroutine(maybe) else str(maybe or "defer")
+            except Exception as e:  # noqa: BLE001
+                print(f"[ACP DEBUG] permission handler error: {e}")
+                decision = "defer"
+        decision = str(decision or "defer").strip().lower()
+        if decision in ("approved", "approve", "allow"):
+            self._pending_permission_requests.pop(msg_id, None)
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"outcome": {"outcome": "approved"}},
+                }
+            )
+            return
+        if decision in ("denied", "deny", "reject"):
+            self._pending_permission_requests.pop(msg_id, None)
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"outcome": {"outcome": "denied"}},
+                }
+            )
+            return
+        try:
+            final_decision = await asyncio.wait_for(
+                fut, timeout=self._permission_wait_timeout_sec
+            )
+        except asyncio.TimeoutError:
+            final_decision = "denied"
+        self._pending_permission_requests.pop(msg_id, None)
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "outcome": {
+                        "outcome": (
+                            "approved"
+                            if str(final_decision).strip().lower() == "approved"
+                            else "denied"
+                        )
+                    }
+                },
+            }
+        )
+
+    @staticmethod
+    def _extract_terminal_command(params: dict) -> tuple[list[str], bool]:
+        if not isinstance(params, dict):
+            return [], False
+        command = params.get("command")
+        if isinstance(command, str) and command.strip():
+            return [command], True
+        cmd = params.get("cmd")
+        if isinstance(cmd, str) and cmd.strip():
+            return [cmd], True
+        program = params.get("program")
+        args = params.get("args")
+        if isinstance(program, str) and program.strip():
+            if isinstance(args, list):
+                return [program, *[str(x) for x in args]], False
+            return [program], False
+        return [], False
+
+    async def _handle_terminal_request(self, method: str, msg_id: int, params: dict):
+        cmd_parts, use_shell = self._extract_terminal_command(params or {})
+        if not cmd_parts:
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {
+                        "code": -32000,
+                        "message": f"unsupported terminal request payload for {method}",
+                    },
+                }
+            )
+            return
+        cwd = str((params or {}).get("cwd") or self.cwd or ".")
+        timeout_sec = float((params or {}).get("timeoutSec") or 60)
+
+        def _run():
+            if use_shell:
+                return subprocess.run(
+                    cmd_parts[0],
+                    cwd=cwd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            return subprocess.run(
+                cmd_parts,
+                cwd=cwd,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+        try:
+            cp = await asyncio.to_thread(_run)
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "exitCode": int(cp.returncode),
+                        "stdout": cp.stdout or "",
+                        "stderr": cp.stderr or "",
+                    },
+                }
+            )
+        except Exception as e:  # noqa: BLE001
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32000, "message": str(e)},
+                }
+            )
+
+    async def _handle_agent_request(self, msg: dict):
+        """处理 agent→client 的请求（fs操作、权限审批、terminal）。"""
+        method = msg.get("method", "")
+        msg_id = msg.get("id")
+        params = msg.get("params", {})
+
+        if method == "session/request_permission":
+            await self._handle_permission_request(msg_id, params)
         elif method == "fs/read_text_file":
             fp = params.get("path", "")
             try:
@@ -238,9 +511,35 @@ class OpenCodeACP:
                         "error": {"code": -32000, "message": str(e)},
                     }
                 )
+        elif method in (
+            "terminal/run_command",
+            "terminal/exec",
+            "terminal/run",
+            "run_terminal_cmd",
+        ):
+            await self._handle_terminal_request(method, msg_id, params)
         else:
-            # 未知请求，返回空结果
-            self._write({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+            log_flow_event(
+                stage="acp",
+                route="agent_request_unhandled",
+                user_text="",
+                session_id=str(self._extract_session_id_from_params(params) or ""),
+                extra={
+                    "method": str(method or ""),
+                    "id": msg_id,
+                    "params_preview": self._summarize_permission_params(params or {}),
+                },
+            )
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"unsupported agent request method: {method}",
+                    },
+                }
+            )
 
     def _write(self, msg: dict):
         """写入 JSON-RPC 消息到 stdin"""
@@ -269,7 +568,7 @@ class OpenCodeACP:
             deadline = time.time() + timeout
             while time.time() < deadline:
                 try:
-                    msg = await asyncio.wait_for(self._response_queue.get(), timeout=1.0)
+                    msg = await asyncio.wait_for(self._recv_for_collect(), timeout=1.0)
                 except asyncio.TimeoutError:
                     if self._proc and self._proc.poll() is not None:
                         raise RuntimeError("opencode acp process exited")
@@ -282,7 +581,7 @@ class OpenCodeACP:
                     and "result" not in msg
                     and "error" not in msg
                 ):
-                    self._handle_agent_request(msg)
+                    await self._handle_agent_request(msg)
                     continue
 
                 # 匹配请求 ID 的响应
@@ -433,6 +732,71 @@ class OpenCodeACP:
         return None
 
     @staticmethod
+    def _slice_balanced_json_object(text: str, start_idx: int) -> str | None:
+        """从 `text[start_idx]=='{'` 起切出花括号平衡的 JSON 子串；失败返回 None。"""
+        s = text or ""
+        if start_idx < 0 or start_idx >= len(s) or s[start_idx] != "{":
+            return None
+        depth = 0
+        in_str = False
+        esc = False
+        i = start_idx
+        while i < len(s):
+            ch = s[i]
+            if esc:
+                esc = False
+                i += 1
+                continue
+            if ch == "\\" and in_str:
+                esc = True
+                i += 1
+                continue
+            if ch == '"':
+                in_str = not in_str
+                i += 1
+                continue
+            if not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return s[start_idx : i + 1]
+            i += 1
+        return None
+
+    @staticmethod
+    def _recover_schema_obj_from_partial_tool_payload(
+        text: str, json_schema: dict
+    ) -> dict | None:
+        """整段 JSON 不可解析时，尝试从原文正则提取 tool + payload（不恢复残缺 reply）。"""
+        s = (text or "").strip()
+        if not s:
+            return None
+        tm = re.search(r'"tool"\s*:\s*"([^"]+)"', s)
+        if not tm:
+            return None
+        tool_raw = tm.group(1).strip()
+        pm = re.search(r'"payload"\s*:\s*\{', s)
+        if not pm:
+            return None
+        brace_start = pm.end() - 1
+        blob = OpenCodeACP._slice_balanced_json_object(s, brace_start)
+        if not blob:
+            return None
+        try:
+            payload_obj = json.loads(blob)
+        except Exception:
+            return None
+        if not isinstance(payload_obj, dict):
+            return None
+        cand: dict = {"tool": tool_raw, "payload": payload_obj}
+        props = json_schema.get("properties") or {}
+        if isinstance(props, dict) and "reply" in props:
+            cand.setdefault("reply", "")
+        return cand
+
+    @staticmethod
     def _project_obj_to_schema_properties(obj: dict | None, schema: dict) -> dict | None:
         """schema 含 properties 且 additionalProperties=false 时，先丢掉未声明的键再校验。
 
@@ -518,14 +882,15 @@ class OpenCodeACP:
         self,
         best_effort: str,
         reply_raw: str,
-        reasoning_raw: str,
+        _reasoning_raw: str,
         json_schema: dict,
     ) -> str:
-        """从单轮模型原文中抽取可回注的用户可见片段（含校验失败轮次的长文）。"""
+        """从单轮模型主回复中抽取可回注的用户可见片段（仅 reply，不含 reasoning）。"""
         props = json_schema.get("properties") or {}
         has_reply = "reply" in props
         out = best_effort
-        for chunk in (reply_raw or "", reasoning_raw or ""):
+        # 安全约束：reasoning 绝不参与用户可见 best_effort 回注，避免把思维链误发到微信侧。
+        for chunk in (reply_raw or "",):
             c = (chunk or "").strip()
             if not c:
                 continue
@@ -615,6 +980,16 @@ class OpenCodeACP:
 
     # ─── 收集流式响应 ───
 
+    async def _recv_for_collect(self) -> dict:
+        """优先消费「回收队首」，再读 ACP 队列（与 _unget_for_collect 成对）。"""
+        if self._recollect_buf:
+            return self._recollect_buf.popleft()
+        return await self._response_queue.get()
+
+    def _unget_for_collect(self, msg: dict) -> None:
+        """把本不该在尾部排空阶段消费的消息放回队首，保证 JSON-RPC 顺序。"""
+        self._recollect_buf.appendleft(msg)
+
     async def _collect_prompt_response(
         self,
         msg_id: int,
@@ -649,7 +1024,7 @@ class OpenCodeACP:
 
         while time.time() < deadline:
             try:
-                msg = await asyncio.wait_for(self._response_queue.get(), timeout=1.0)
+                msg = await asyncio.wait_for(self._recv_for_collect(), timeout=1.0)
             except asyncio.TimeoutError:
                 if self._proc and self._proc.poll() is not None:
                     break_reason = "process_exited"
@@ -661,11 +1036,111 @@ class OpenCodeACP:
 
             last_activity = time.time()
 
+            if (
+                "method" in msg
+                and "id" in msg
+                and "result" not in msg
+                and "error" not in msg
+            ):
+                await self._handle_agent_request(msg)
+                continue
+
             # 最终响应（匹配 msg_id）
             if msg.get("id") == msg_id:
                 final_result = msg
                 saw_final_response = True
                 break_reason = "matched_final_response"
+                # 与下方「其它响应」一致：把 result.parts 并入正文（部分网关只在 result 里给全文）
+                if "result" in msg:
+                    res = msg.get("result") or {}
+                    for p in res.get("parts", []) or []:
+                        if p.get("type") == "text":
+                            all_text.append(p.get("text", ""))
+                # ACP 常见竞态：JSON-RPC result 先于最后几帧 agent_message_chunk 入队；
+                # 若立即 break，流式 JSON 会残缺 → structured 走 partial 恢复且 reply 为空。
+                tail_deadline = time.time() + 0.35
+                while time.time() < tail_deadline:
+                    try:
+                        msg2 = await asyncio.wait_for(self._recv_for_collect(), timeout=0.06)
+                    except asyncio.TimeoutError:
+                        break
+                    last_activity = time.time()
+                    if (
+                        "method" in msg2
+                        and "id" in msg2
+                        and "result" not in msg2
+                        and "error" not in msg2
+                    ):
+                        await self._handle_agent_request(msg2)
+                        continue
+                    if msg2.get("method") == "session/update":
+                        params2 = msg2.get("params", {}) or {}
+                        if session_id:
+                            sid2 = (
+                                params2.get("sessionId")
+                                or params2.get("session_id")
+                                or params2.get("id")
+                                or ""
+                            )
+                            if sid2 and sid2 != session_id:
+                                self._unget_for_collect(msg2)
+                                break
+                        all_raw.append(msg2)
+                        update2 = params2.get("update", {})
+                        su2 = update2.get("sessionUpdate", "")
+                        if su2:
+                            update_counters[su2] = update_counters.get(su2, 0) + 1
+                        if su2 == "text_delta":
+                            all_text.append(update2.get("textDelta", ""))
+                        elif su2 == "agent_message_chunk":
+                            content2 = update2.get("content", {})
+                            if isinstance(content2, dict) and content2.get("type") == "text":
+                                all_text.append(content2.get("text", ""))
+                            elif isinstance(content2, list):
+                                for part in content2:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        all_text.append(part.get("text", ""))
+                        elif su2 == "agent_thought_chunk":
+                            content2 = update2.get("content", {})
+                            if isinstance(content2, dict) and content2.get("type") == "text":
+                                all_reasoning.append(content2.get("text", ""))
+                        elif su2 == "thinking":
+                            all_reasoning.append(
+                                update2.get("textDelta", update2.get("text", ""))
+                            )
+                        elif su2 in ("tool_call_update", "tool_call"):
+                            name, arg_chunk = self._tool_call_name_and_args(update2)
+                            if name:
+                                tool_status_transitions.append(f"executing:{name}")
+                            if arg_chunk:
+                                key = name or f"tool_{len(tool_args_buf)+1}"
+                                tool_args_buf[key] = (tool_args_buf.get(key, "") + arg_chunk)
+                                tool_args_partial_updates += 1
+                                if self._json_brace_balanced(tool_args_buf[key]):
+                                    tool_args_finalized += 1
+                        elif su2 == "end_turn":
+                            saw_end_turn = True
+                            break_reason = "end_turn"
+                            all_notifications.append(msg2)
+                            break
+                        elif su2 == "usage_update":
+                            pass
+                        else:
+                            if su2:
+                                _uk2 = (
+                                    list(update2.keys())[:5]
+                                    if isinstance(update2, dict)
+                                    else []
+                                )
+                                print(
+                                    f"[ACP DEBUG] unhandled sessionUpdate (tail): {su2}, keys={_uk2}"
+                                )
+                        all_notifications.append(msg2)
+                        if su2 == "end_turn":
+                            break
+                        continue
+                    self._unget_for_collect(msg2)
+                    break
                 break
 
             # 记录所有消息用于调试
@@ -765,7 +1240,7 @@ class OpenCodeACP:
         必须通过 session/set_config_option 设置。
         模型格式: "provider/model" 如 "opencode-go/deepseek-v4-flash"
         """
-        params = {"cwd": self.cwd, "mcpServers": []}
+        params = {"cwd": self.cwd, "mcpServers": self.mcp_servers}
 
         resp = await self._send_and_recv("session/new", params)
         result = resp.get("result", {})
@@ -806,9 +1281,18 @@ class OpenCodeACP:
         else:
             print(f"[ACP] model set to: {model}")
 
-    async def prompt(self, session_id: str, message: str, *, trace_tag: str = "prompt") -> tuple:
+    async def prompt(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        trace_tag: str = "prompt",
+        session_context: dict[str, Any] | None = None,
+    ) -> tuple:
         """发送文本消息，返回 (reply_text, reasoning_text)"""
         async with self._rpc_lock:
+            if session_context is not None:
+                self.set_session_context(session_id, session_context)
             msg_id = self._send(
                 "session/prompt",
                 self._build_prompt_params(
@@ -979,6 +1463,22 @@ class OpenCodeACP:
             if isinstance(obj2, dict) and self._validate_schema_obj(obj2, json_schema):
                 return _finalize_out(obj2, spill_text=spill2, attempt_idx=i + 1)
 
+            for probe in (reply or "", reasoning or ""):
+                recovered = OpenCodeACP._recover_schema_obj_from_partial_tool_payload(
+                    probe, json_schema
+                )
+                if not isinstance(recovered, dict):
+                    continue
+                projected = self._project_obj_to_schema_properties(recovered, json_schema)
+                if isinstance(projected, dict) and self._validate_schema_obj(
+                    projected, json_schema
+                ):
+                    raw_spill = self._extract_first_json_object(probe)
+                    spill_r = self._take_structured_reply_spill(raw_spill, json_schema)
+                    return _finalize_out(
+                        projected, spill_text=spill_r, attempt_idx=i + 1
+                    )
+
         log_flow_event(
             stage="route",
             route="prompt_structured_fail",
@@ -1127,3 +1627,4 @@ def build_system_prompt(
 - "N月N日" / "N.N" / "N月N号" → 当前年份的该日期
 - "明天" / "后天" → 相对日期
 - 无明确日期 → 使用今天"""
+

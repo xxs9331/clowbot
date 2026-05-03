@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from handlers.dispatcher import (
+    DispatcherMixin,
     _coalesce_unified_decision,
     register_tool_handler,
 )
@@ -113,3 +114,26 @@ def test_done_current_alias_recognized():
 def test_coalesce_falsy_tool_to_none(raw):
     tool, _, _ = _coalesce_unified_decision({"tool": raw})
     assert tool == TOOL_DECISION_NONE
+
+
+def test_select_candidate_tools_short_time_hint_adds_remind_add():
+    c = DispatcherMixin._select_candidate_tools("中午一点吧", "", [])
+    assert TOOL_REMIND_ADD in c
+
+
+def test_select_candidate_tools_long_text_skips_time_only_remind():
+    long_t = "今天中午一点我们约了朋友吃饭然后下午去公园散步"
+    assert len(long_t) >= 20
+    c = DispatcherMixin._select_candidate_tools(long_t, "", [])
+    assert TOOL_REMIND_ADD not in c
+
+
+def test_sanitize_none_reply_appends_guard_after_retries_and_markers():
+    raw = "好 明天下午一点提醒你拿快递 记下了"
+    out = DispatcherMixin._sanitize_vague_none_reply(
+        raw, TOOL_DECISION_NONE, structured_trace={"structured_attempts": 2}
+    )
+    assert "系统侧未确认写入" in out
+    assert DispatcherMixin._sanitize_vague_none_reply(
+        raw, TOOL_DECISION_NONE, structured_trace={"structured_attempts": 1}
+    ) == raw

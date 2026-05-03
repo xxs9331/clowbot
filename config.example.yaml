@@ -11,8 +11,10 @@ opencode:
   max_tokens: 4096
   model: "opencode-go/deepseek-v4-flash"        # 默认文本模型
   multimodal_model: "opencode-go/qwen3.6-plus"  # 多模态（图片）模型
+  # 可选：透传到 session/new 的 MCP servers（结构同 OpenCode）
+  mcp_servers: []
 
-  # 意图小模型（可选；缺省 = 主 model）
+  # 意图小模型（历史字段）：Handler 已不再调用 classify_intent；下列键存在也不读取。
   # intent_model: "alibaba-cn/qwen3.5-flash"
   # intent_threshold_high: 0.8
   # intent_threshold_mid: 0.5
@@ -54,6 +56,10 @@ bot:
   # 工具执行超过该秒数仍未返回时发一条慢提示（与 tool_progress_messages 独立；0 关闭）
   tool_slow_hint_seconds: 3
   tool_slow_hint_text: "还在处理中，稍等我一下…"
+  # 白名单用户走全能力 OpenCode agent（支持终端/fs）；可用 "*" 表示全部用户
+  wx_agent_allowlist: []
+  # 全能力 agent 会话模型（为空则沿用 opencode.model）
+  agent_model: ""
 
 # ─── Agent 可靠性 ───
 agent:
