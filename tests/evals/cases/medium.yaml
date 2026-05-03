@@ -1,0 +1,126 @@
+# 中等任务（2-5 步，含歧义/上下文依赖/多信息）
+cases:
+  - id: "eval-m01"
+    type: medium
+    description: "无时间提醒——不应直接设提醒"
+    input: "记得提醒我喝水"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 2
+    expected_failure_modes:
+      - "直接判为 remind.add 且无时间"
+      - "reply 未追问时间"
+
+  - id: "eval-m02"
+    type: medium
+    description: "多信息一句话——记录+提醒混合"
+    input: "今天跑了5公里，体重71.5，记得明天9点叫我"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "category", "event_date"]
+      category: "运动"
+    max_steps: 3
+    expected_failure_modes:
+      - "只处理了部分信息"
+      - "分类错误（体重→运动而非身体）"
+      - "提醒部分被忽略"
+
+  - id: "eval-m03"
+    type: medium
+    description: "日期推断——昨天"
+    input: "昨天晚饭吃了火锅"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "event_date"]
+    max_steps: 1
+    expected_failure_modes:
+      - "event_date 未正确推断为昨日"
+      - "误判为闲聊(none)"
+
+  - id: "eval-m04"
+    type: medium
+    description: "代词继承——需要读 historical context"
+    input: "跟上次一样的"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 2
+    expected_failure_modes:
+      - "未追问就强行记录"
+      - "reply 假称已处理"
+    context_before:
+      - tool: "record.add"
+        payload: { "text": "跑了5公里", "category": "运动", "event_date": "2026-05-02" }
+
+  - id: "eval-m05"
+    type: medium
+    description: "分类边界——睡眠"
+    input: "睡了8小时"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "category"]
+      category: "身体"
+    max_steps: 1
+    expected_failure_modes:
+      - "分类错误（判成事务）"
+
+  - id: "eval-m06"
+    type: medium
+    description: "混合请求——记录+同时问待办"
+    input: "记一下今天跑了步，顺便待办下一个是什么"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "category"]
+    max_steps: 2
+    expected_failure_modes:
+      - "只处理了其中一个意图"
+      - "把查看待办的意图当成 todo.next 执行"
+
+  - id: "eval-m07"
+    type: medium
+    description: "纠正上一条记录"
+    input: "刚才那条错了，是73不是72"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 2
+    expected_failure_modes:
+      - "当成新记录写入"
+      - "reply 假称已修改但实际未改"
+
+  - id: "eval-m08"
+    type: medium
+    description: "纯情绪——不该触发任何工具"
+    input: "困死了不想动"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 1
+    expected_failure_modes:
+      - "误判为 record.add（把情绪当记录）"
+
+  - id: "eval-m09"
+    type: medium
+    description: "待办跳过+下一个"
+    input: "这个跳过，看下一个是什么"
+    expected:
+      tool: "todo.skip_current"
+      payload_keys: []
+    max_steps: 2
+    expected_failure_modes:
+      - "只跳过未显示下一个"
+      - "reply 未输出下一个待办内容"
+
+  - id: "eval-m10"
+    type: medium
+    description: "无日期记录——应默认今日"
+    input: "喝了杯咖啡"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "event_date"]
+      category: "事务"
+    max_steps: 1
+    expected_failure_modes:
+      - "event_date 缺失或错误"
+      - "分类错误"

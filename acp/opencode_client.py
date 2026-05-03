@@ -722,6 +722,9 @@ class OpenCodeACP:
                     saw_end_turn = True
                     break_reason = "end_turn"
                     break
+                elif su == "usage_update":
+                    # OpenCode 推送的用量/计费元数据；不参与正文拼接，已由 update_counters 计数。
+                    pass
                 else:
                     if su:
                         _uk = (

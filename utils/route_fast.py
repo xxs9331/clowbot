@@ -12,8 +12,9 @@ _META_TODO_CLARIFY = re.compile(
     r"(skill|skills|SKILL|技能|路由|元问题|怎么判定|调用.*skill|待办.*skill|走.*skill)",
     re.I,
 )
+# 「做完」单独匹配会命中「还没做完」里的子串，误触 done_current；用负向后顾排除「没/还」紧邻的前缀。
 _FAST_TODO_DONE = re.compile(
-    r"(做完了|做完|搞定了|搞定|完成了|好了|ok|OK|Ok|okk|OKK|行了|可以了|已完成)",
+    r"(做完了|(?<![没还])做完|搞定了|搞定|完成了|好了|ok|OK|Ok|okk|OKK|行了|可以了|已完成)",
     re.I,
 )
 

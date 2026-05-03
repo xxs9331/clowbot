@@ -1,0 +1,63 @@
+# 简单任务（单工具，一步到位）
+cases:
+  - id: "eval-s01"
+    type: simple
+    description: "纯生活记录——体重"
+    input: "今天体重72kg"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "category", "event_date"]
+      category: "身体"
+    max_steps: 1
+    expected_failure_modes:
+      - "误判为闲聊(none)"
+      - "分类错误（判成事务/运动）"
+
+  - id: "eval-s02"
+    type: simple
+    description: "纯提醒——明确时间"
+    input: "明天下午3点提醒我交周报"
+    expected:
+      tool: "remind.add"
+      payload_keys: ["text", "hhmm", "event_date"]
+    max_steps: 1
+    expected_failure_modes:
+      - "误判为记录(record.add)"
+      - "时间解析错误"
+      - "误判为闲聊(none)"
+
+  - id: "eval-s03"
+    type: simple
+    description: "纯待办完成"
+    input: "第一个做完了"
+    expected:
+      tool: "todo.done_current"
+      payload_keys: []
+    max_steps: 1
+    expected_failure_modes:
+      - "待办队列空时仍选 done_current"
+      - "误判为闲聊(none)"
+
+  - id: "eval-s04"
+    type: simple
+    description: "纯闲聊——问候"
+    input: "你好呀"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 1
+    expected_failure_modes:
+      - "误触发工具（record/remind/todo）"
+      - "reply 假称正在查日记"
+
+  - id: "eval-s05"
+    type: simple
+    description: "查看类——不应触发写工具"
+    input: "我今天记了些什么"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 1
+    expected_failure_modes:
+      - "误判为 record.add（把查看当记录）"
+      - "reply 编造列表"

@@ -54,3 +54,17 @@ bot:
   # 工具执行超过该秒数仍未返回时发一条慢提示（与 tool_progress_messages 独立；0 关闭）
   tool_slow_hint_seconds: 3
   tool_slow_hint_text: "还在处理中，稍等我一下…"
+
+# ─── Agent 可靠性 ───
+agent:
+  # 跨消息连续自动执行步数上限；超过则强制中断，需人工介入
+  max_steps: 15
+  # 每 N 步触发一次轻量 checkpoint（当前进度/缺什么/下一步）
+  checkpoint_every: 5
+  # structured state 超时分钟数；超过后全量清空重建
+  state_ttl_minutes: 30
+  # 调试模型（可选；为空则复用主模型）
+  # debug_model: "opencode-go/deepseek-v4-mini"
+  debug_model: ""
+  # 启用调试模型（默认 false，仅开发调试时打开）
+  debug_enabled: false

@@ -46,3 +46,12 @@ def test_done_shortcut_when_active_queue():
     d = build_fast_unified_decision("OK", "u1", _active_queue())
     assert d is not None
     assert d["tool"] == TOOL_TODO_DONE_CURRENT
+
+
+def test_done_shortcut_skips_negated_zuo_wan():
+    """「还没做完」含子串「做完」，不得误触 done_current。"""
+    assert build_fast_unified_decision("还没做完，等会再做", "u1", _active_queue()) is None
+
+
+def test_done_shortcut_still_matches_plain_zuo_wan():
+    assert build_fast_unified_decision("刚做完", "u1", _active_queue()) is not None

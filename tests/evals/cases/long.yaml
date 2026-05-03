@@ -1,0 +1,83 @@
+# 长任务（6-12 步，跨消息连续交互）
+cases:
+  - id: "eval-l01"
+    type: long
+    description: "多轮待办马拉松——添加→完成→跳过→完成→查看"
+    input: "完成第一个"
+    expected:
+      tool: "todo.done_current"
+      payload_keys: []
+    max_steps: 8
+    expected_failure_modes:
+      - "步骤间丢失待办队列状态"
+      - "完成操作未正确移动指针"
+    context_before:
+      - tool: "todo.merge_new_items"
+        payload: { "tasks": ["买水果", "洗衣服", "写日报", "跑步", "看书"] }
+
+  - id: "eval-l02"
+    type: long
+    description: "提醒修改链——设→改时间→确认→取消"
+    input: "明天的提醒改到下午4点"
+    expected:
+      tool: "none"
+      payload_keys: []
+    max_steps: 6
+    expected_failure_modes:
+      - "当成新提醒写入而非修改"
+      - "reply 假称已修改"
+    context_before:
+      - tool: "remind.add"
+        payload: { "text": "交周报", "hhmm": "15:00", "event_date": "2026-05-04" }
+
+  - id: "eval-l03"
+    type: long
+    description: "生活记录多天回溯——连续记三天不同事件"
+    input: "前天也跑了，不过只跑了3公里"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "event_date"]
+      category: "运动"
+    max_steps: 8
+    expected_failure_modes:
+      - "event_date 推断错误（前天→错误日期）"
+      - "上下文丢失导致分类回退"
+    context_before:
+      - tool: "record.add"
+        payload: { "text": "昨天跑了5公里", "category": "运动", "event_date": "2026-05-02" }
+
+  - id: "eval-l04"
+    type: long
+    description: "混合域长对话——闲聊穿插工具调用"
+    input: "对了我昨天还看了半小时书"
+    expected:
+      tool: "record.add"
+      payload_keys: ["text", "category", "event_date"]
+      category: "阅读"
+    max_steps: 10
+    expected_failure_modes:
+      - "闲聊后丢失对话上下文"
+      - "分类回退到默认(事务)"
+    context_before:
+      - tool: "none"
+        payload: {}
+      - tool: "record.add"
+        payload: { "text": "体重72kg", "category": "身体", "event_date": "2026-05-02" }
+      - tool: "none"
+        payload: {}
+
+  - id: "eval-l05"
+    type: long
+    description: "状态丢失恢复——长时间不操作后继续"
+    input: "继续刚才的待办"
+    expected:
+      tool: "todo.next"
+      payload_keys: []
+    max_steps: 10
+    expected_failure_modes:
+      - "待办队列已丢失/过期"
+      - "reply 假称有队列但实际无"
+      - "误判为闲聊(none)"
+    context_before:
+      - tool: "todo.merge_new_items"
+        payload: { "tasks": ["写论文", "改PPT", "发邮件"] }

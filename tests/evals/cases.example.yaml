@@ -1,0 +1,33 @@
+# ClawBot 路由评测用例（示例）
+# 运行：python tests/evals/run_eval.py --cases tests/evals/cases.example.yaml
+# 或：pytest tests/test_eval_runner.py
+
+version: 1
+
+cases:
+  # 简单：活跃待办 +「做完了」→ 确定性快通道 todo.done_current（不调用 LLM）
+  - id: fast_done_current
+    tier: simple
+    input: "做完了"
+    from_user: "eval-user-1"
+    pre_setup:
+      active_todo_queue: true
+      tasks: ["写评测骨架", "补 structured state"]
+      idx: 0
+    expect_tool: "todo.done_current"
+
+  # 简单：查看待办 → 走 local_view，不进入 unified apply
+  - id: local_view_todo
+    tier: simple
+    input: "查看待办"
+    expect_eval_extra_branch: "local_view"
+    expect_reply_contains:
+      - "待办"
+
+  # 中等：无规则命中、无 LLM（acp=None）→ unified 失败后 safe_fallback
+  - id: safe_fallback_gibberish
+    tier: medium
+    input: "xyzabc 无意义一串"
+    expect_eval_extra_branch: "safe_fallback"
+    expect_reply_contains:
+      - "记一下"

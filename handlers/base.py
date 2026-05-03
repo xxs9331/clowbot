@@ -62,6 +62,7 @@ class Handler(
         self.todo_session_id: str = ""
         self.record_session_id: str = ""
         self.remind_session_id: str = ""
+        self.debug_session_id: str = ""  # 调试模型专用 session
         self._reminded_ids: set[str] = set()
         self._reminder_refresh: asyncio.Event = asyncio.Event()
         self._todo_queues: dict[str, dict] = {}
@@ -72,6 +73,8 @@ class Handler(
         self._user_route_memory: dict[str, list[dict]] = {}
         # 工具状态提示防抖（避免 200ms 内反复切换）
         self._tool_status_last: dict[tuple[str, str], tuple[float, str]] = {}
+        # 每用户结构化工作记忆：回答"现在在做什么"（跨消息持久）
+        self._user_structured_state: dict[str, dict] = {}
 
     def _context_spill_dir(self) -> Path:
         root = Path(self.cfg["vault"]["root"]).resolve()
@@ -137,6 +140,199 @@ class Handler(
         if detail:
             text = f"{text}\n{detail}"
         await self.wx.send_text(text, from_user, context_token)
+
+    # ── 结构化工作记忆 state ──
+
+    def _get_or_init_structured_state(self, user_id: str) -> dict:
+        """取或创建用户结构化 state；仅在访问时惰性 init。"""
+        if user_id not in self._user_structured_state:
+            # 尝试从持久化恢复
+            restored = self._restore_structured_state(user_id)
+            self._user_structured_state[user_id] = restored
+        return self._user_structured_state[user_id]
+
+    def _update_structured_state(
+        self,
+        user_id: str,
+        *,
+        decision: dict,
+        handled: bool,
+        user_text: str,
+    ) -> None:
+        """工具执行后更新结构化 state（成功/失败路径均调用）。"""
+        if not user_id:
+            return
+        state = self._get_or_init_structured_state(user_id)
+        tool = (decision.get("tool") or "").strip()
+        payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else {}
+
+        # 步数：仅当 tool 不是 none 且已处理时递增
+        was_auto_step = tool and tool != "none" and handled
+        if was_auto_step:
+            state["consecutive_auto_steps"] = state.get("consecutive_auto_steps", 0) + 1
+        else:
+            # tool=none 或未处理 → 判断是否闲聊重置
+            state["consecutive_auto_steps"] = state.get("consecutive_auto_steps", 0)
+            if tool == "none" and self._is_idle_chat(user_text, decision):
+                state["task"] = ""
+                state["findings_so_far"] = []
+                state["next_step"] = ""
+
+        # 记录最近工具与结果
+        state["last_tool"] = tool or "none"
+        state["last_outcome"] = "success" if handled else "failed"
+        state["updated_at"] = time.time()
+
+        # 收集事实（仅对写操作）
+        if tool in ("record.add", "remind.add"):
+            fact = (payload.get("text") or user_text)[:120]
+            collected = state.setdefault("collected_data", [])
+            if fact not in collected:
+                collected.append(fact)
+                if len(collected) > 10:
+                    collected.pop(0)
+
+        # 更新下一步提示（轻量）
+        if tool.startswith("todo."):
+            state["next_step"] = f"待办操作: {tool}"
+        elif tool == "none":
+            state["next_step"] = "等待用户下一条消息"
+        else:
+            state["next_step"] = f"已完成: {tool}"
+
+        # 持久化（静默失败）
+        self._persist_structured_state(user_id)
+
+    def _structured_state_context_block(self, user_id: str) -> str:
+        """生成结构化 state 上下文块（注入 prompt 顶部）。"""
+        state = self._get_or_init_structured_state(user_id)
+        # 检查 TTL
+        ttl = self._get_agent_config("state_ttl_minutes", 30)
+        if time.time() - state.get("updated_at", 0) > ttl * 60:
+            state.clear()
+            self._user_structured_state[user_id] = self._default_state()
+
+        parts: list[str] = []
+        if state.get("task"):
+            parts.append(f"- task: {state['task']}")
+        collected = state.get("collected_data", [])
+        if collected:
+            parts.append(f"- collected_data: {json.dumps(collected[-5:], ensure_ascii=False)}")
+        findings = state.get("findings_so_far", [])
+        if findings:
+            parts.append(f"- findings_so_far: {json.dumps(findings[-5:], ensure_ascii=False)}")
+        if state.get("next_step"):
+            parts.append(f"- next_step: {state['next_step']}")
+        parts.append(f"- auto_steps: {state.get('consecutive_auto_steps', 0)}")
+
+        if not parts:
+            return ""
+        return "structured_state:\n" + "\n".join(parts) + "\n"
+
+    @staticmethod
+    def _default_state() -> dict:
+        return {
+            "task": "",
+            "collected_data": [],
+            "findings_so_far": [],
+            "next_step": "",
+            "consecutive_auto_steps": 0,
+            "last_tool": "none",
+            "last_outcome": "none",
+            "updated_at": 0.0,
+        }
+
+    @staticmethod
+    def _is_idle_chat(user_text: str, decision: dict) -> bool:
+        """判断本轮 tool=none 是否属于闲聊（应重置 task），而非追问/确认。
+
+        规则：reply 中不含原文引用标记（``、列表、提交号）→ 认定为闲聊。
+        """
+        reply = str(decision.get("reply", "") or "")
+        # 含反引号或列表 → 有实质内容，不是纯闲聊
+        if "`" in reply or "\n-" in reply:
+            return False
+        # 含 hex hash → 有技术引用
+        if re.search(r"\b[0-9a-f]{7,40}\b", reply, re.I):
+            return False
+        # 追问标记词
+        t = (user_text or "").strip()
+        followup_words = ("刚才", "上次", "前面", "继续", "那个", "这条", "那", "它", "这")
+        if len(t) < 40 and any(w in t for w in followup_words):
+            return False
+        return True
+
+    async def _maybe_checkpoint(self, user_id: str) -> None:
+        """每 N 步触发轻量 checkpoint：记录"当前到哪了/缺什么/下一步"。"""
+        every = int(self._get_agent_config("checkpoint_every", 5) or 5)
+        state = self._get_or_init_structured_state(user_id)
+        steps = state.get("consecutive_auto_steps", 0)
+        if steps <= 0 or steps % every != 0:
+            return
+        # 用固定模板生成自检摘要（不调 LLM，降低成本）
+        collected = state.get("collected_data", [])
+        summary = (
+            f"step={steps} | task={state.get('task', '无')[:60]} | "
+            f"collected={len(collected)}条 | next={state.get('next_step', '待定')[:40]}"
+        )
+        findings = state.setdefault("findings_so_far", [])
+        findings.append(summary)
+        if len(findings) > 10:
+            findings.pop(0)
+        state["findings_so_far"] = findings
+        self._persist_structured_state(user_id)
+        log_flow_event(
+            stage="route",
+            route="agent_checkpoint",
+            user_text="",
+            from_user=user_id,
+            session_id=self.session_id,
+            extra={"step": steps, "summary": summary},
+        )
+
+    def _get_agent_config(self, key: str, default=None):
+        return (self.cfg.get("agent") or {}).get(key, default)
+
+    # ── State 持久化 ──
+
+    def _structured_state_dir(self) -> Path:
+        root = Path(self.cfg["vault"]["root"]).resolve()
+        p = root / ".clawbot_tmp" / "structured_state"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _restore_structured_state(self, user_id: str) -> dict:
+        """从 JSON 文件恢复 state；失败或无文件时返回默认空 state。"""
+        fp = self._structured_state_dir() / f"{user_id[-8:] or 'anon'}.json"
+        if not fp.exists():
+            return self._default_state()
+        try:
+            raw = json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            return self._default_state()
+        base = self._default_state()
+        # 只恢复最小必要字段，其他按默认
+        for k in ("task", "findings_so_far", "collected_data", "consecutive_auto_steps"):
+            if k in raw:
+                base[k] = raw[k]
+        return base
+
+    def _persist_structured_state(self, user_id: str) -> None:
+        """把当前 state 最小必要字段写入 JSON（静默失败）。"""
+        state = self._user_structured_state.get(user_id)
+        if not state:
+            return
+        fp = self._structured_state_dir() / f"{user_id[-8:] or 'anon'}.json"
+        slim = {
+            "task": state.get("task", ""),
+            "findings_so_far": state.get("findings_so_far", []),
+            "collected_data": state.get("collected_data", []),
+            "consecutive_auto_steps": state.get("consecutive_auto_steps", 0),
+        }
+        try:
+            fp.write_text(json.dumps(slim, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     def _remember_unified_decision(self, from_user: str, decision: dict) -> None:
         """成功执行 tool 后写入短期记忆（仅关键字段，控制体积）。"""
@@ -222,10 +418,18 @@ class Handler(
         self.record_session_id = await self.acp.create_session()
         self.remind_session_id = await self.acp.create_session()
 
+        # 调试模式：额外创建一个 debug session，使用 debug model
+        agent_cfg = self.cfg.get("agent") or {}
+        debug_model = (agent_cfg.get("debug_model") or "").strip()
+        if debug_model and bool(agent_cfg.get("debug_enabled", False)):
+            self.debug_session_id = await self.acp.create_session(model=debug_model)
+        else:
+            self.debug_session_id = ""
+
         # 域会话启动时一次性注入角色约束，后续写盘只传 JSON envelope。
         v = self.cfg["vault"]
         sys_prompt = build_system_prompt(v["root"], v["daily_log_dir"])
-        await asyncio.gather(
+        prime_tasks = [
             self.acp.prompt(
                 self.todo_session_id,
                 (
@@ -250,14 +454,56 @@ class Handler(
                 ),
                 trace_tag="prime_remind",
             ),
-        )
+        ]
+        if self.debug_session_id:
+            prime_tasks.append(
+                self.acp.prompt(
+                    self.debug_session_id,
+                    (
+                        f"{sys_prompt}\n\n"
+                        "这是调试域上下文。使用更便宜的模型，用于 prompt 迭代与流程验证。"
+                    ),
+                    trace_tag="prime_debug",
+                )
+            )
+        await asyncio.gather(*prime_tasks)
+
         # 兼容旧字段：默认代表 unified 会话
         self.session_id = self.unified_session_id
-        print(
-            "[Bot] sessions:"
-            f" unified={self.unified_session_id} todo={self.todo_session_id}"
-            f" record={self.record_session_id} remind={self.remind_session_id}"
+        parts = [
+            f"unified={self.unified_session_id} todo={self.todo_session_id}",
+            f"record={self.record_session_id} remind={self.remind_session_id}",
+        ]
+        if self.debug_session_id:
+            parts.append(f"debug={self.debug_session_id}")
+        print(f"[Bot] sessions: {' '.join(parts)}")
+
+    def _resolve_acp_session(self, *, prefer_debug: bool = False) -> str:
+        """返回当前应使用的 ACP session id。
+
+        当 agent.debug_enabled 为 true 且 prefer_debug 时返回 debug session；
+        否则返回 unified session。
+        """
+        agent_cfg = self.cfg.get("agent") or {}
+        if (
+            prefer_debug
+            and self.debug_session_id
+            and bool(agent_cfg.get("debug_enabled", False))
+        ):
+            model_role = "debug"
+            sid = self.debug_session_id
+        else:
+            model_role = "primary"
+            sid = self.unified_session_id
+        log_flow_event(
+            stage="acp",
+            route="session_resolve",
+            user_text="",
+            from_user="",
+            session_id=sid,
+            extra={"model_role": model_role, "prefer_debug": prefer_debug},
         )
+        return sid
 
     def notify_reminder_refresh(self):
         """提醒列表发生变化时，唤醒调度器重建索引"""
@@ -373,6 +619,37 @@ class Handler(
 
         return {"tool": tool, "payload": payload, "reply": reply}
 
+    async def eval_run_routing_pipeline(
+        self,
+        text: str,
+        *,
+        from_user: str = "eval-001",
+        context_token: str = "eval-ctx",
+    ) -> dict:
+        """离线评测：走 `_run_chat_routing_pipeline`，不经过 `handle` 的 typing/本地视图前置。
+
+        返回 `decisions_applied`（每次进入 `_apply_unified_decision` 的 tool/payload 摘要）、
+        `wx_sent`（DummyWX 收集的可见回复）、`eval_extras`（未走 apply 的分支标记）。
+        """
+        self._eval_mode = True
+        self._eval_pipeline_trace = []
+        self._eval_extras: list[dict] = []
+        try:
+            await self._run_chat_routing_pipeline(text, from_user, context_token)
+        finally:
+            self._eval_mode = False
+        sent = getattr(self.wx, "sent", [])
+        if not isinstance(sent, list):
+            sent = []
+        extras = getattr(self, "_eval_extras", []) or []
+        return {
+            "user_text": text,
+            "from_user": from_user,
+            "decisions_applied": list(self._eval_pipeline_trace),
+            "eval_extras": list(extras),
+            "wx_sent": list(sent),
+        }
+
     async def _run_chat_routing_pipeline(
         self, text: str, from_user: str, context_token: str
     ) -> None:
@@ -387,6 +664,39 @@ class Handler(
             extra={"trace": msg_trace},
         )
 
+        # ── 步数硬上限检测 ──
+        max_steps = int(self._get_agent_config("max_steps", 15) or 15)
+        state = self._get_or_init_structured_state(from_user)
+        auto_steps = state.get("consecutive_auto_steps", 0)
+        if auto_steps >= max_steps:
+            log_flow_event(
+                stage="route",
+                route="agent_step_limit_reached",
+                user_text=text,
+                from_user=from_user,
+                session_id=self.session_id,
+                extra={
+                    "trace": msg_trace,
+                    "consecutive_auto_steps": auto_steps,
+                    "max_steps": max_steps,
+                    "task": state.get("task", "")[:120],
+                    "next_step": state.get("next_step", "")[:120],
+                },
+            )
+            task = (state.get("task") or "无")[:80]
+            findings = state.get("findings_so_far", []) or []
+            findings_line = "、".join(str(f)[:60] for f in findings[-3:]) or "无"
+            await self.wx.send_text(
+                "🏁 已连续执行太多步，先停一下。\n\n"
+                f"当前任务：{task}\n"
+                f"已确认：{findings_line}\n"
+                f"下一步计划：{state.get('next_step', '待定')[:80]}\n\n"
+                "要继续的话，直接告诉我要做什么~",
+                from_user,
+                context_token,
+            )
+            return
+
         intent_early, _ = detect_intent(text)
         if intent_early == INTENT_QUERY_TODO:
             log_flow_event(
@@ -397,6 +707,10 @@ class Handler(
                 session_id=self.session_id,
                 extra={"intent": intent_early, "trace": msg_trace},
             )
+            if getattr(self, "_eval_mode", False):
+                ex = getattr(self, "_eval_extras", None)
+                if isinstance(ex, list):
+                    ex.append({"branch": "local_view", "kind": "todo"})
             await self._local_view_with_optional_llm_fallback(
                 "todo", from_user, context_token, text
             )
@@ -422,6 +736,13 @@ class Handler(
                 context_token,
                 user_text=text,
             )
+            self._update_structured_state(
+                from_user,
+                decision=fast_decision,
+                handled=handled_fast,
+                user_text=text,
+            )
+            await self._maybe_checkpoint(from_user)
             log_flow_event(
                 stage="exit",
                 route="fast_unified",
@@ -488,6 +809,13 @@ class Handler(
                         context_token,
                         user_text=text,
                     )
+                    self._update_structured_state(
+                        from_user,
+                        decision=decision,
+                        handled=handled_sm,
+                        user_text=text,
+                    )
+                    await self._maybe_checkpoint(from_user)
                     log_flow_event(
                         stage="exit",
                         route="intent_llm",
@@ -525,6 +853,13 @@ class Handler(
             context_token,
             user_text=text,
         )
+        self._update_structured_state(
+            from_user,
+            decision=decision,
+            handled=handled,
+            user_text=text,
+        )
+        await self._maybe_checkpoint(from_user)
         log_flow_event(
             stage="exit",
             route="llm_unified",
@@ -563,6 +898,13 @@ class Handler(
             await self._apply_unified_decision(
                 decision, from_user, context_token, user_text=text
             )
+            self._update_structured_state(
+                from_user,
+                decision=decision,
+                handled=True,
+                user_text=text,
+            )
+            await self._maybe_checkpoint(from_user)
             print(f"[Bot] ⏰ 提醒: {data}")
             return
         if intent == INTENT_QUERY_REMIND:
@@ -593,6 +935,10 @@ class Handler(
                 "intent_hint": intent_hint,
             },
         )
+        if getattr(self, "_eval_mode", False):
+            ex = getattr(self, "_eval_extras", None)
+            if isinstance(ex, list):
+                ex.append({"branch": "safe_fallback"})
         await self.wx.send_text(
             "我没看懂这条要怎么记。要我把它当作生活记录写进今日日记吗？回「记一下」即可。",
             from_user,

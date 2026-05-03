@@ -1,0 +1,132 @@
+# 真模型 E2E：20 条（默认 vault 仍指向评测 tmp，避免写生产日记）
+# 运行：CLAWBOT_EVAL_REAL=1 python tests/evals/run_eval.py --real --cases tests/evals/cases.e2e.yaml
+#
+# 断言策略：确定性路径用硬断言；走 unified 的用 expect_tool_one_of / expect_wx_nonempty 降低 flaky。
+
+version: 1
+
+cases:
+  # ─── 简单（5）：规则 / 快通道 / 兜底 ───
+  - id: e01_local_view_todo
+    tier: simple
+    input: "查看待办"
+    expect_eval_extra_branch: "local_view"
+    expect_reply_contains: ["待办"]
+
+  - id: e02_fast_done_current
+    tier: simple
+    input: "做完了"
+    from_user: "e2e-u-fast"
+    pre_setup: { active_todo_queue: true, tasks: ["写代码", "跑评测"], idx: 0 }
+    expect_tool: "todo.done_current"
+
+  - id: e03_noise_reply
+    tier: simple
+    input: "asdfghjkl___无意义噪声___"
+    # 真模型可能对乱码直接 none+回复，不一定落到 safe_fallback
+    expect_wx_nonempty: true
+
+  - id: e04_rule_remind_colon
+    tier: simple
+    input: "09:15 提醒我喝水"
+    expect_tools_any: ["remind.add"]
+
+  - id: e05_rule_remind_call_me
+    tier: simple
+    input: "叫我今晚21:30刷牙"
+    expect_tools_any: ["remind.add"]
+
+  # ─── 中等（10）：unified + 意图，软断言为主 ───
+  - id: e06_record_weight
+    tier: medium
+    input: "今早体重 71.2kg"
+    expect_tool_one_of: ["record.add", "none"]
+    expect_wx_nonempty: true
+
+  - id: e07_record_run
+    tier: medium
+    input: "刚才慢跑 4 公里"
+    expect_tool_one_of: ["record.add", "none"]
+    expect_wx_nonempty: true
+
+  - id: e08_record_reading
+    tier: medium
+    input: "今天读了《三体》20 页"
+    expect_tool_one_of: ["record.add", "none"]
+    expect_wx_nonempty: true
+
+  - id: e09_record_courier
+    tier: medium
+    input: "快递 04978880 已签收"
+    expect_tool_one_of: ["record.add", "none"]
+    expect_wx_nonempty: true
+
+  - id: e10_todo_add_plain
+    tier: medium
+    input: "添加待办：买牛奶、取快递"
+    expect_tool_one_of: ["todo.merge_new_items", "none"]
+    expect_wx_nonempty: true
+
+  - id: e11_chat_thanks
+    tier: medium
+    input: "谢谢啦"
+    expect_tool_one_of: ["none"]
+    expect_wx_nonempty: true
+
+  - id: e12_query_remind
+    tier: medium
+    input: "查看提醒"
+    expect_wx_nonempty: true
+
+  - id: e13_query_record
+    tier: medium
+    input: "查看记录"
+    expect_wx_nonempty: true
+
+  - id: e14_remind_no_time
+    tier: medium
+    input: "提醒我喝水"
+    expect_tool_one_of: ["none", "remind.add"]
+    expect_wx_nonempty: true
+
+  - id: e15_chit_chat
+    tier: medium
+    input: "今天天气真不错"
+    expect_tool_one_of: ["none"]
+    expect_wx_nonempty: true
+
+  # ─── 待办队列 + 推进（依赖 pre_setup）───
+  - id: e16_todo_next
+    tier: medium
+    input: "下一个"
+    from_user: "e2e-u-queue"
+    pre_setup: { active_todo_queue: true, tasks: ["A 任务", "B 任务"], idx: 0 }
+    expect_tool_one_of: ["todo.next", "none"]
+    expect_wx_nonempty: true
+
+  - id: e17_todo_not_done
+    tier: medium
+    input: "还没做完，等会再做"
+    from_user: "e2e-u-queue"
+    pre_setup: { active_todo_queue: true, tasks: ["A 任务", "B 任务"], idx: 0 }
+    expect_tool_one_of: ["todo.not_done", "none"]
+    expect_wx_nonempty: true
+
+  # ─── 长句 / 复合（5）：单条里多信息，模型择一或合并 ───
+  - id: e18_long_compound_record_todo
+    tier: long
+    input: "记一下：午饭吃了轻食；顺便加待办晚上整理书桌"
+    expect_tool_one_of: ["record.add", "todo.merge_new_items", "none"]
+    expect_wx_nonempty: true
+
+  - id: e19_long_date_record
+    tier: long
+    input: "5月2日那天睡了6小时，有点累"
+    expect_tool_one_of: ["record.add", "none"]
+    expect_wx_nonempty: true
+
+  - id: e20_long_anaphora
+    tier: long
+    input: "她也改签了，跟刚才那条一样记到生活日志"
+    expect_tool_one_of: ["record.add", "none"]
+    expect_wx_nonempty: true

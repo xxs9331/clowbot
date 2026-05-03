@@ -255,7 +255,22 @@ class DispatcherMixin:
         return hint_block, context_block, tool_hint_block
 
     def _augment_context_block_with_memory(self, user_id: str, context_block: str) -> str:
-        """把 Handler 提供的短期结构化记忆拼进 unified 上下文（可选）。"""
+        """把 Handler 提供的结构化记忆拼进 unified 上下文。
+
+        分层注入：
+          - 顶部：structured_state_block（现在在做什么）
+          - 中部：recent_decisions_json（刚才做了什么，现有）
+          - 底部：context_block（本轮上下文）
+        """
+        # 顶部：结构化 state
+        state_block = ""
+        gs = getattr(self, "_structured_state_context_block", None)
+        if callable(gs):
+            try:
+                state_block = (gs(user_id) or "").strip()
+            except Exception:
+                state_block = ""
+        # 中部：最近决策
         extra_ctx = ""
         ge = getattr(self, "_extra_unified_context", None)
         if callable(ge):
@@ -263,9 +278,13 @@ class DispatcherMixin:
                 extra_ctx = (ge(user_id) or "").strip()
             except Exception:
                 extra_ctx = ""
+        parts = []
+        if state_block:
+            parts.append(state_block)
+        parts.append(context_block)
         if extra_ctx:
-            return f"{context_block}{extra_ctx}\n"
-        return context_block
+            parts.append(extra_ctx)
+        return "\n".join(parts) + "\n"
 
     def _unified_decide_tool_payload_reply_rules_block(self) -> str:
         """tool/payload/reply 字段说明 + 分流（合并路径与仅决策路径共用）。"""
@@ -569,6 +588,20 @@ class DispatcherMixin:
     ) -> bool:
         """执行 dispatcher 表里 tool 名对应的 coach；末尾统一调用 post-write hooks。"""
         tool, payload, reply = _coalesce_unified_decision(decision)
+        if getattr(self, "_eval_mode", False):
+            tr = getattr(self, "_eval_pipeline_trace", None)
+            if isinstance(tr, list):
+                snap = dict(payload) if isinstance(payload, dict) else {}
+                raw = json.dumps(snap, ensure_ascii=False)
+                if len(raw) > 800:
+                    snap = {"_truncated": True, "keys": list(snap.keys())}
+                tr.append(
+                    {
+                        "tool": tool,
+                        "payload": snap,
+                        "reply_preview": (reply or "")[:240],
+                    }
+                )
 
         if tool == TOOL_DECISION_NONE:
             if reply:
