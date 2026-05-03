@@ -147,6 +147,12 @@ def log_acp_turn(
         lines.append(f"  reply_selected_source: {m.get('reply_selected_source')}")
     if m.get("reply_merge_conflict"):
         lines.append(f"  reply_merge_conflict: {m.get('reply_merge_conflict')}")
+    if m.get("structured_attempts") is not None:
+        lines.append(f"  structured_attempts: {m.get('structured_attempts')}")
+    if m.get("best_effort_reply_len") is not None:
+        lines.append(f"  best_effort_reply_len: {m.get('best_effort_reply_len')}")
+    if m.get("final_reply_source"):
+        lines.append(f"  final_reply_source: {m.get('final_reply_source')}")
     if m.get("tool_args_partial_updates") is not None:
         lines.append(f"  tool_args_partial_updates: {m.get('tool_args_partial_updates')}")
     if m.get("tool_args_finalized") is not None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import suppress
 from typing import Any, Awaitable, Callable
 
@@ -295,6 +296,32 @@ class DispatcherMixin:
             f'- 不要把「查看记录/查看待办/查看提醒」判成 {TOOL_RECORD_ADD} 或 {TOOL_TODO_MERGE_NEW_ITEMS}\n'
             f'- 不要把无时间的“记得提醒我”直接判成 {TOOL_REMIND_ADD}（应先要时间或给 none）\n'
             f'- 不要把纯情绪/寒暄句判成 todo.*，应给 {TOOL_DECISION_NONE}\n\n'
+            "可追问性（reply 硬约束）：\n"
+            "- 若 reply 中出现「刚才/前面/刚给你列过/已经说过」等指代，必须同时附上 1～3 条关键原文"
+            "（例如提交号一行、列表项一行），禁止空指代。\n"
+            "- 若你本轮没有可粘贴的原文，必须明确写「本轮无法附上原文」，不要假装已经展示过。\n\n"
+        )
+
+    @staticmethod
+    def _sanitize_vague_none_reply(reply: str, tool: str) -> str:
+        """tool=none 时：承接语但无列表/提交号等证据则补一句可追问提示。"""
+        if tool != TOOL_DECISION_NONE:
+            return reply
+        t = (reply or "").strip()
+        if not t:
+            return reply
+        if not any(
+            x in t
+            for x in OpenCodeACP._STRUCTURED_VAGUE_REFERENCE_SUBSTRINGS
+        ):
+            return reply
+        if "`" in t or re.search(r"\b[0-9a-f]{7,40}\b", t, re.I):
+            return reply
+        if "\n-" in t or re.search(r"\n\s*[-*]\s", t):
+            return reply
+        return (
+            t
+            + "\n（若上面没有你要的列表/提交号原文，回我「重发完整列表」我按原文贴。）"
         )
 
     async def _llm_unified_decide_structured_combined(
@@ -316,6 +343,7 @@ class DispatcherMixin:
             "根对象只能包含 tool、payload、reply 三个键；禁止其它键。\n"
             "reply：须至少一句可见中文；换行写成 \\\\n；"
             "禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；"
+            "若使用「刚才/前面/刚列过」等指代，必须附上关键原文片段，禁止空指代；"
             "tool 非 none 时可附带一句简短确认。\n\n"
             f"{tool_hint}"
             f"{rules}"
@@ -412,7 +440,9 @@ class DispatcherMixin:
             user_id=user_id, text=text, intent_hint=intent_hint
         )
         if isinstance(decision, dict):
+            trace = decision.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
             tool, payload, reply = _coalesce_unified_decision(decision)
+            reply = self._sanitize_vague_none_reply(reply, tool)
             if reply and max_rl > 0 and len(reply) > max_rl:
                 reply = reply[:max_rl]
             log_flow_event(
@@ -420,7 +450,11 @@ class DispatcherMixin:
                 route="unified_structured_ok",
                 user_text=text,
                 session_id=self.unified_session_id,
-                extra={"decision": decision, "unified_struct_path": "combined"},
+                extra={
+                    "decision": decision,
+                    "unified_struct_path": "combined",
+                    **({"structured_trace": trace} if trace else {}),
+                },
             )
             return {"tool": tool, "payload": payload, "reply": reply}
 
@@ -428,6 +462,7 @@ class DispatcherMixin:
             user_id=user_id, text=text, intent_hint=intent_hint
         )
         if isinstance(decision, dict):
+            trace = decision.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
             spill_key = OpenCodeACP.STRUCTURED_DECISION_SPILL_REPLY_KEY
             spill = str(decision.pop(spill_key, "") or "").strip()
             if spill and max_rl > 0 and len(spill) > max_rl:
@@ -442,11 +477,12 @@ class DispatcherMixin:
                     "decision": decision,
                     "unified_struct_path": "decision_only",
                     "structured_spill_reused": bool(spill and tool == TOOL_DECISION_NONE),
+                    **({"structured_trace": trace} if trace else {}),
                 },
             )
             reply = ""
             if spill and tool == TOOL_DECISION_NONE:
-                reply = spill
+                reply = self._sanitize_vague_none_reply(spill, tool)
             else:
                 try:
                     reply = await self._llm_generate_unified_reply(
@@ -463,6 +499,9 @@ class DispatcherMixin:
                         extra={"error": str(e)[:200], "tool": tool},
                     )
                     reply = ""
+            reply = self._sanitize_vague_none_reply(reply, tool)
+            if reply and max_rl > 0 and len(reply) > max_rl:
+                reply = reply[:max_rl]
             return {"tool": tool, "payload": payload, "reply": reply}
 
         log_flow_event(

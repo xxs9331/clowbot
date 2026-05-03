@@ -109,7 +109,9 @@ def test_prompt_structured_retry_until_valid():
             trace_tag="t",
         )
     )
-    assert out == {"tool": "none", "payload": {}}
+    assert out["tool"] == "none"
+    assert out["payload"] == {}
+    assert out.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None) is not None
 
 
 def test_unified_structured_success_then_generate_reply():

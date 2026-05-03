@@ -78,6 +78,15 @@ def test_spill_followup_uses_lower_threshold(tmp_path: Path):
     assert out.get("_spilled") is True
 
 
+def test_dispatcher_sanitize_vague_none_keeps_evidence():
+    from handlers.dispatcher import DispatcherMixin
+
+    with_evidence = "刚给你列过\n- `9417ccd` feat: x"
+    assert "重发完整列表" not in DispatcherMixin._sanitize_vague_none_reply(
+        with_evidence, "none"
+    )
+
+
 def test_tool_status_debounce(tmp_path: Path):
     h = _build_handler(tmp_path)
     wx = h.wx

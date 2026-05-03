@@ -13,13 +13,14 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 import time
 import threading
 from typing import Optional, Callable
 
-from utils.flow_log import log_acp_turn
+from utils.flow_log import log_acp_turn, log_flow_event
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 MULTIMODAL_MODEL = "opencode-go/mimo-v2-omni"
@@ -461,6 +462,113 @@ class OpenCodeACP:
             return ""
         return str(r).strip()
 
+    # dispatcher 在合并决策后 pop 掉，仅用于观测
+    STRUCTURED_TRACE_META_KEY = "_structured_trace"
+
+    _STRUCTURED_VAGUE_REFERENCE_SUBSTRINGS = (
+        "刚给你列过",
+        "刚才说过了",
+        "刚说过",
+        "前面说过了",
+        "已经列过",
+        "刚才列过了",
+        "前面列过",
+        "都说过了",
+        "已经说过",
+        "前面给你",
+        "刚给你看过",
+    )
+
+    @classmethod
+    def _structured_informativeness(cls, s: str) -> int:
+        """粗分：用于在多次 structured 尝试间保留更有信息量的用户可见文本。"""
+        t = (s or "").strip()
+        if len(t) < 24:
+            return 0
+        score = min(len(t) // 100, 6)
+        if re.search(r"\b[0-9a-f]{7,40}\b", t, re.I):
+            score += 10
+        if "`" in t or "feat:" in t or "fix:" in t or "refactor:" in t:
+            score += 5
+        if "\n-" in t or "\n•" in t or re.search(r"\n\s*[-*]\s", t):
+            score += 6
+        if "http://" in t or "https://" in t:
+            score += 4
+        return score
+
+    @classmethod
+    def _structured_is_vague_reference_reply(cls, s: str) -> bool:
+        t = (s or "").strip()
+        if not t or len(t) > 420:
+            return False
+        if cls._structured_informativeness(t) >= 12:
+            return False
+        return any(x in t for x in cls._STRUCTURED_VAGUE_REFERENCE_SUBSTRINGS)
+
+    @classmethod
+    def _pick_richer_structured_reply(cls, current: str, candidate: str) -> str:
+        ca = (candidate or "").strip()
+        if not ca:
+            return current
+        if cls._structured_informativeness(ca) > cls._structured_informativeness(current):
+            return ca
+        return current
+
+    def _accumulate_best_effort_from_raw(
+        self,
+        best_effort: str,
+        reply_raw: str,
+        reasoning_raw: str,
+        json_schema: dict,
+    ) -> str:
+        """从单轮模型原文中抽取可回注的用户可见片段（含校验失败轮次的长文）。"""
+        props = json_schema.get("properties") or {}
+        has_reply = "reply" in props
+        out = best_effort
+        for chunk in (reply_raw or "", reasoning_raw or ""):
+            c = (chunk or "").strip()
+            if not c:
+                continue
+            ro = self._extract_first_json_object(c)
+            if isinstance(ro, dict) and has_reply:
+                r = str(ro.get("reply") or "").strip()
+                projected = self._project_obj_to_schema_properties(ro, json_schema)
+                if r and (
+                    not isinstance(projected, dict)
+                    or not self._validate_schema_obj(projected, json_schema)
+                ):
+                    out = self._pick_richer_structured_reply(out, r)
+            if ro is None and len(c) >= 36:
+                if c.startswith("{") and not c.endswith("}"):
+                    continue
+                if c.startswith("{") and c.endswith("}"):
+                    continue
+                out = self._pick_richer_structured_reply(out, c)
+        return out
+
+    @classmethod
+    def _merge_structured_final_reply(
+        cls,
+        final_reply: str,
+        best_effort: str,
+        tool: str,
+    ) -> tuple[str, str]:
+        """返回 (merged_reply, final_reply_source)。"""
+        fr = (final_reply or "").strip()
+        be = (best_effort or "").strip()
+        tv = (tool or "").strip().lower()
+        if not be or tv != "none":
+            return fr, "combined_direct"
+        if cls._structured_is_vague_reference_reply(fr) and cls._structured_informativeness(
+            be
+        ) > cls._structured_informativeness(fr):
+            merged = f"{be.rstrip()}\n\n{fr}".strip()
+            return merged, "combined_merged_best+vague_final"
+        if cls._structured_informativeness(be) > cls._structured_informativeness(fr) + 4:
+            merged = f"{be.rstrip()}\n\n{fr}".strip() if fr else be
+            return merged, "combined_merged_informativeness"
+        return fr, "combined_direct"
+
     @classmethod
     def _validate_schema_obj(cls, obj: dict, schema: dict) -> bool:
         if not isinstance(obj, dict) or not isinstance(schema, dict):
@@ -784,6 +892,9 @@ class OpenCodeACP:
         不依赖 provider 原生 function calling，兼容 openai-compatible 网关。
         若模型在 JSON 里多写了 reply 且被 schema 剥离，成功时会把原文放在键
         STRUCTURED_DECISION_SPILL_REPLY_KEY 上一并返回，供 dispatcher 在 tool=none 时复用，免再打 unified_reply。
+
+        多轮重试时保留「信息量更高」的中间自然语言（best_effort），避免首轮已列出事实
+        但次轮仅输出空泛承接句导致微信侧看不到原文。
         """
         schema_text = json.dumps(json_schema, ensure_ascii=False)
         structured_prompt = (
@@ -794,27 +905,88 @@ class OpenCodeACP:
             "仅输出 JSON："
         )
         attempts = max(1, int(retry_count or 1))
+        props = json_schema.get("properties") or {}
+        has_reply_field = isinstance(props, dict) and "reply" in props
+        best_effort = ""
+
+        def _finalize_out(
+            base: dict,
+            *,
+            spill_text: str,
+            attempt_idx: int,
+        ) -> dict:
+            out = dict(base)
+            tool_s = str(out.get("tool") or "none").strip().lower()
+            reply_src = "combined_direct"
+            if has_reply_field:
+                fr0 = str(out.get("reply") or "").strip()
+                merged, reply_src = self._merge_structured_final_reply(
+                    fr0, best_effort, tool_s
+                )
+                out["reply"] = merged
+            spill_final = (spill_text or "").strip()
+            if not has_reply_field and tool_s == "none" and best_effort.strip():
+                if self._structured_informativeness(best_effort) > self._structured_informativeness(
+                    spill_final
+                ):
+                    spill_final = best_effort.strip()
+            if spill_final:
+                out[self.STRUCTURED_DECISION_SPILL_REPLY_KEY] = spill_final
+            trace = {
+                "structured_attempts": attempt_idx,
+                "best_effort_reply_len": len((best_effort or "").strip()),
+                "final_reply_source": reply_src
+                if has_reply_field
+                else ("decision_only_spill" if spill_final else "decision_only"),
+            }
+            if trace["structured_attempts"] > 1 or trace["best_effort_reply_len"] > 0:
+                out[self.STRUCTURED_TRACE_META_KEY] = trace
+                log_acp_turn(
+                    trace=f"{trace_tag}_summary",
+                    session_id=session_id,
+                    model=self.model,
+                    prompt=f"(structured summary) {message[:400]}",
+                    reply="",
+                    reasoning="",
+                    meta={
+                        "structured_attempts": trace["structured_attempts"],
+                        "best_effort_reply_len": trace["best_effort_reply_len"],
+                        "final_reply_source": trace["final_reply_source"],
+                    },
+                )
+            return out
+
         for i in range(attempts):
             reply, reasoning = await self.prompt(
                 session_id,
                 structured_prompt,
                 trace_tag=f"{trace_tag}#{i + 1}",
             )
+            best_effort = self._accumulate_best_effort_from_raw(
+                best_effort, reply or "", reasoning or "", json_schema
+            )
             raw_obj = self._extract_first_json_object(reply or "")
             spill = self._take_structured_reply_spill(raw_obj, json_schema)
             obj = self._project_obj_to_schema_properties(raw_obj, json_schema)
             if isinstance(obj, dict) and self._validate_schema_obj(obj, json_schema):
-                if spill:
-                    return {**obj, self.STRUCTURED_DECISION_SPILL_REPLY_KEY: spill}
-                return obj
-            # 兜底：部分模型把 JSON 放在 reasoning 通道
+                return _finalize_out(obj, spill_text=spill, attempt_idx=i + 1)
             raw_obj2 = self._extract_first_json_object(reasoning or "")
             spill2 = self._take_structured_reply_spill(raw_obj2, json_schema)
             obj2 = self._project_obj_to_schema_properties(raw_obj2, json_schema)
             if isinstance(obj2, dict) and self._validate_schema_obj(obj2, json_schema):
-                if spill2:
-                    return {**obj2, self.STRUCTURED_DECISION_SPILL_REPLY_KEY: spill2}
-                return obj2
+                return _finalize_out(obj2, spill_text=spill2, attempt_idx=i + 1)
+
+        log_flow_event(
+            stage="route",
+            route="prompt_structured_fail",
+            user_text="",
+            session_id=session_id,
+            extra={
+                "trace_tag": trace_tag,
+                "structured_attempts": attempts,
+                "best_effort_reply_len": len((best_effort or "").strip()),
+            },
+        )
         return None
 
     async def prompt_with_image(

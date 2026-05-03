@@ -99,8 +99,63 @@ def test_prompt_structured_attaches_spill_when_reply_extra_key():
     out = asyncio.run(
         acp.prompt_structured("sid", "msg", json_schema=schema, retry_count=1, trace_tag="t")
     )
-    assert out == {
-        "tool": "none",
-        "payload": {},
-        OpenCodeACP.STRUCTURED_DECISION_SPILL_REPLY_KEY: "复用这句",
+    assert out["tool"] == "none"
+    assert out["payload"] == {}
+    assert out[OpenCodeACP.STRUCTURED_DECISION_SPILL_REPLY_KEY] == "复用这句"
+    out.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
+    assert set(out.keys()) == {"tool", "payload", OpenCodeACP.STRUCTURED_DECISION_SPILL_REPLY_KEY}
+
+
+def test_prompt_structured_merges_best_effort_when_final_vague():
+    """首轮自然语言含提交列表，次轮合规 JSON 但 reply 空泛时，应合并进 reply。"""
+    acp = OpenCodeACP()
+    first = (
+        "让我看看这个目录里有什么哦 这里有 git 仓库！\n\n"
+        "- `9417ccd` feat: 增强请求处理 (14分钟前)\n"
+        "- `aa1beac` feat: 增强配置 (35小时前)\n"
+    )
+    second = '{"tool":"none","payload":{},"reply":"就这个目录 刚给你列过了 还有啥想看的"}'
+
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+        if trace_tag.endswith("#1"):
+            return first, ""
+        return second, ""
+
+    acp.prompt = _stub_prompt  # type: ignore[method-assign]
+    schema = {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": ["none"]},
+            "payload": {"type": "object"},
+            "reply": {"type": "string"},
+        },
+        "required": ["tool", "payload", "reply"],
+        "additionalProperties": False,
     }
+    out = asyncio.run(
+        acp.prompt_structured(
+            "sid",
+            "msg",
+            json_schema=schema,
+            retry_count=3,
+            trace_tag="unified_decide_combined",
+        )
+    )
+    assert out["tool"] == "none"
+    assert "9417ccd" in out["reply"]
+    assert "刚给你列过了" in out["reply"]
+    tr = out.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
+    assert tr is not None
+    assert tr["structured_attempts"] == 2
+    assert "merged" in tr["final_reply_source"]
+
+
+def test_sanitize_vague_none_reply_appends_hint_when_no_evidence():
+    from handlers.dispatcher import DispatcherMixin
+
+    raw = "就这个目录 刚给你列过了 还有啥想看的"
+    out = DispatcherMixin._sanitize_vague_none_reply(raw, "none")
+    assert "重发完整列表" in out
+    assert "`9417ccd`" in DispatcherMixin._sanitize_vague_none_reply(
+        "刚列过\n- `9417ccd` feat: x", "none"
+    )
