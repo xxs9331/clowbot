@@ -8,6 +8,7 @@ from utils.log_sync import (
     get_log_path,
     mark_reminder_done_by_time_text,
 )
+from utils.remind_polish_llm import build_reminder_wx_message
 from utils.section_reader import read_remind_section
 
 
@@ -71,7 +72,13 @@ async def remind_check_loop(handler):
                 if rid in handler._reminded_ids:
                     continue
 
-                msg = f"⏰ 提醒（{r['time']}）：{r['text']}"
+                bot_cfg = handler.cfg.get("bot") or {}
+                msg = await build_reminder_wx_message(
+                    getattr(handler, "acp", None),
+                    bot_cfg,
+                    remind_time=r["time"],
+                    remind_text=r["text"],
+                )
                 if handler.wx._context_tokens:
                     last_user, last_token = list(handler.wx._context_tokens.items())[-1]
                     await handler.wx.send_text(msg, last_user, last_token)

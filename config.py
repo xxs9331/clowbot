@@ -25,10 +25,68 @@ def _log_reasoning(msg_text: str, reasoning: str):
         f.write(entry)
 
 
+def collect_config_errors(cfg: dict) -> list[str]:
+    """收集配置错误；供单测断言。通过则返回空列表。"""
+    errors: list[str] = []
+    if not isinstance(cfg, dict):
+        return ["config root must be a mapping"]
+
+    vault = cfg.get("vault")
+    if not isinstance(vault, dict):
+        errors.append("vault must be a mapping")
+    else:
+        for key in ("root", "daily_log_dir", "diary_dir", "project_dir", "task_dir"):
+            if not str(vault.get(key) or "").strip():
+                errors.append(f"vault.{key} is required and must be non-empty")
+
+    tl = cfg.get("timeline")
+    if tl is None:
+        errors.append("timeline section is required")
+    elif not isinstance(tl, dict):
+        errors.append("timeline must be a mapping")
+    else:
+        str_keys = (
+            "root_dir",
+            "timeline_dir",
+            "append_separator",
+            "project_overview_path",
+            "state_dir",
+        )
+        for key in str_keys:
+            if not str(tl.get(key) or "").strip():
+                errors.append(f"timeline.{key} is required and must be non-empty")
+        if "checkin_enabled" not in tl:
+            errors.append("timeline.checkin_enabled is required (true or false)")
+        try:
+            sm = int(tl.get("slot_minutes"))
+        except (TypeError, ValueError):
+            errors.append("timeline.slot_minutes must be an integer")
+        else:
+            if sm != 30:
+                errors.append("timeline.slot_minutes must be 30 (48-slot format)")
+        try:
+            float(tl.get("checkin_ai_timeout_sec"))
+        except (TypeError, ValueError):
+            errors.append("timeline.checkin_ai_timeout_sec must be a number")
+
+    return errors
+
+
+def validate_config(cfg: dict) -> None:
+    """严格校验：失败则打印并 ``sys.exit(1)``。"""
+    errors = collect_config_errors(cfg)
+    if errors:
+        for e in errors:
+            print(f"CONFIG ERROR: {e}")
+        sys.exit(1)
+
+
 def load_config() -> dict:
     path = PACKAGE_ROOT / "config.yaml"
     if not path.exists():
         print("ERROR: config.yaml not found. Copy from config.example.yaml")
         sys.exit(1)
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    validate_config(cfg)
+    return cfg

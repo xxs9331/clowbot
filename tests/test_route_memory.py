@@ -7,6 +7,8 @@ from pathlib import Path
 
 from handlers.base import Handler
 
+from tests.helpers import minimal_timeline, minimal_vault
+
 
 class _DummyWX:
     def __init__(self):
@@ -17,8 +19,13 @@ class _DummyWX:
 
 
 def _build_handler(tmp_path: Path) -> Handler:
+    r = str(tmp_path)
     cfg = {
-        "vault": {"root": str(tmp_path), "daily_log_dir": "2-Areas/习惯养成/生活日志"},
+        "vault": {
+            **minimal_vault(r),
+            "daily_log_dir": "2-Areas/习惯养成/生活日志",
+        },
+        "timeline": minimal_timeline(r),
         "bot": {"tool_progress_messages": True, "tool_progress_min_interval_sec": 0.5},
         "opencode": {"memory_spill_chars": 40},
     }
@@ -66,8 +73,10 @@ def test_spill_large_payload_for_memory(tmp_path: Path):
 
 
 def test_spill_followup_uses_lower_threshold(tmp_path: Path):
+    r = str(tmp_path)
     cfg = {
-        "vault": {"root": str(tmp_path), "daily_log_dir": "x"},
+        "vault": {**minimal_vault(r), "daily_log_dir": "x"},
+        "timeline": minimal_timeline(r),
         "bot": {},
         "opencode": {"memory_spill_chars": 500, "memory_spill_chars_followup": 80},
     }

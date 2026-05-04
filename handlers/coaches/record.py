@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from config import _log_reasoning
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
+from utils.flow_log import log_flow_event
 from utils.time_utils import time_str
 from utils.tool_names import DOMAIN_RECORD, TOOL_RECORD_ADD
 
@@ -56,6 +59,32 @@ class RecordCoachMixin:
         await self.wx.send_text(
             reply or out or f"已记录 {category}：{text}", from_user, context_token
         )
+        try:
+            from utils.timeline_sync import (
+                slot_for_hhmm,
+                timeline_enabled,
+                upsert_timeline_slot,
+            )
+
+            if timeline_enabled(self.cfg):
+                if event_date:
+                    try:
+                        tdt = datetime.strptime(event_date, "%Y-%m-%d")
+                    except ValueError:
+                        tdt = datetime.now()
+                else:
+                    tdt = datetime.now()
+                slot = slot_for_hhmm(now_hm, tdt)
+                line = f"{category}·{text}" if category else text
+                upsert_timeline_slot(self.cfg, slot, line, dt=tdt)
+        except Exception as e:
+            log_flow_event(
+                stage="timeline",
+                route="write_fail",
+                user_text=(text or "")[:120],
+                from_user=from_user,
+                extra={"source": "record_coach_dual_write", "error": str(e)[:200]},
+            )
         return True
 
 

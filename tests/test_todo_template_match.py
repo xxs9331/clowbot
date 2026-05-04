@@ -4,10 +4,13 @@ from pathlib import Path
 
 from handlers.coaches.todo import TodoCoachMixin
 
+from tests.helpers import minimal_timeline, minimal_vault
+
 
 class _Dummy(TodoCoachMixin):
     def __init__(self, root: Path):
-        self.cfg = {"vault": {"root": str(root)}}
+        r = str(root)
+        self.cfg = {"vault": minimal_vault(r), "timeline": minimal_timeline(r)}
 
 
 def _prepare_registry(tmp_path: Path) -> None:

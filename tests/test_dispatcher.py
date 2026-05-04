@@ -128,6 +128,13 @@ def test_select_candidate_tools_long_text_skips_time_only_remind():
     assert TOOL_REMIND_ADD not in c
 
 
+def test_select_candidate_tools_future_relative_date_adds_remind_add():
+    c = DispatcherMixin._select_candidate_tools(
+        "提醒我三天后下午两点交材料", "", []
+    )
+    assert TOOL_REMIND_ADD in c
+
+
 def test_sanitize_none_reply_appends_guard_after_retries_and_markers():
     raw = "好 明天下午一点提醒你拿快递 记下了"
     out = DispatcherMixin._sanitize_vague_none_reply(

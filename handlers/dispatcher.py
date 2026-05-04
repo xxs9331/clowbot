@@ -179,6 +179,12 @@ class DispatcherMixin:
             )
         if len(t) < 20 and _CANDIDATE_TIME_HINT_RE.search(t):
             out.append(TOOL_REMIND_ADD)
+        # 相对未来日期 + 钟点 + 备忘语义 → 优先提醒（与时间轴状态句区分）
+        if any(x in t for x in ("三天后", "两天后", "明天", "后天", "下周", "过几天")):
+            if any(x in t for x in ("点", ":", "：", "半")) and any(
+                x in t for x in ("提醒", "叫我", "别忘", "备忘", "闹钟")
+            ):
+                out.append(TOOL_REMIND_ADD)
         # 保序去重
         seen = set()
         uniq: list[str] = []
@@ -231,6 +237,7 @@ class DispatcherMixin:
             "分流：\n"
             f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
+            f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点（如两点、14:00）且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录）\n'
             f'- 待办推进/完成/重排/跳过/放弃 → todo.*\n'
             f'- 纯闲聊/问助手状态 → {TOOL_DECISION_NONE}，reply 禁止假称正在查日记\n'
             f'- 查日记/记忆等只读需求由入口层处理，仍输出 {TOOL_DECISION_NONE}，reply 可提示用户用「查看记录」等，勿编造列表\n'
@@ -325,6 +332,7 @@ class DispatcherMixin:
             "分流规则：\n"
             f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
+            f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录；与「过去半小时在做什么」类状态句区分）\n'
             f'- 待办推进/完成/重排/跳过/放弃 → todo.*\n'
             f'- 纯闲聊、问助手在干嘛、评价/吐槽 → {TOOL_DECISION_NONE}（不得假称正在帮用户查日记或记忆）\n'
             f'- 读今日日记/查记忆/列最近几条记录等只读查询由消息层本地处理，若用户句子里已有「查看记录」「最近几条记忆」等触发词，仍选 {TOOL_DECISION_NONE}，不要编造查询结果\n'

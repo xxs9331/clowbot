@@ -70,8 +70,20 @@ def merge_config_for_eval(tmp_vault_root: Path, loaded: dict | None) -> dict:
         "vault": {
             "root": str(tmp_vault_root),
             "daily_log_dir": "2-Areas/习惯养成/生活日志",
-            "project_dir": "",
-            "task_dir": "",
+            "diary_dir": "2-Areas/习惯养成/日记",
+            "project_dir": "1-Projects/生生",
+            "task_dir": "任务系统",
+        },
+        "timeline": {
+            "enabled": False,
+            "root_dir": str(tmp_vault_root),
+            "timeline_dir": "2-Areas/习惯养成/时间轴",
+            "state_dir": "3-Resources/工具集/.bot_state",
+            "slot_minutes": 30,
+            "append_separator": "|",
+            "checkin_enabled": False,
+            "project_overview_path": "1-Projects/项目进度总览.md",
+            "checkin_ai_timeout_sec": 12,
         },
         "bot": {
             "max_reply_length": 2000,
@@ -105,8 +117,17 @@ def merge_config_for_eval(tmp_vault_root: Path, loaded: dict | None) -> dict:
         out["vault"] = {
             "root": str(tmp_vault_root),
             "daily_log_dir": str(lv.get("daily_log_dir") or out["vault"]["daily_log_dir"]),
-            "project_dir": str(lv.get("project_dir") or ""),
-            "task_dir": str(lv.get("task_dir") or ""),
+            "diary_dir": str(lv.get("diary_dir") or out["vault"]["diary_dir"]),
+            "project_dir": str(lv.get("project_dir") or out["vault"]["project_dir"]),
+            "task_dir": str(lv.get("task_dir") or out["vault"]["task_dir"]),
+        }
+    lt = loaded.get("timeline")
+    if isinstance(lt, dict):
+        t0 = out["timeline"]
+        out["timeline"] = {
+            **t0,
+            **{k: v for k, v in lt.items() if v is not None and v != ""},
+            "root_dir": str(tmp_vault_root),
         }
     return out
 

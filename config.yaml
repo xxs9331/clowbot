@@ -22,8 +22,20 @@ opencode:
 vault:
   root: "D:/Lenovo/Documents/世界树/世界树"
   daily_log_dir: "2-Areas/习惯养成/生活日志"
+  diary_dir: "2-Areas/习惯养成/日记"
   project_dir: "1-Projects/生生"
   task_dir: "任务系统"
+
+timeline:
+  enabled: true
+  root_dir: "D:/Lenovo/Documents/世界树/世界树"
+  timeline_dir: "2-Areas/习惯养成/时间轴"
+  state_dir: "3-Resources/工具集/.bot_state"
+  slot_minutes: 30
+  append_separator: "|"
+  checkin_enabled: true
+  project_overview_path: "1-Projects/项目进度总览.md"
+  checkin_ai_timeout_sec: 12
 
 # ─── 生生项目分类 ───
 categories:
@@ -40,3 +52,4 @@ bot:
   max_reply_length: 2000         # 回复最大长度（微信限制）
   wx_agent_allowlist: ["*"]  # 或具体 wxid
   agent_model: ""  # 为空则沿用 opencode.model
+  reminder_polish_enabled: true

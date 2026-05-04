@@ -23,9 +23,11 @@ from .coaches import RecordCoachMixin, RemindCoachMixin, TodoCoachMixin
 from .dispatcher import DispatcherMixin, _coalesce_unified_decision
 from .image import ImageMixin
 from .local_view import LocalViewMixin
+from .timeline_hooks import TimelineHooksMixin
 
 
 class Handler(
+    TimelineHooksMixin,
     LocalViewMixin,
     ImageMixin,
     DispatcherMixin,
@@ -36,6 +38,7 @@ class Handler(
     """ClawBot 业务总入口（Mixin 组合）。
 
     Mixin 职责：
+      - TimelineHooksMixin 时间轴起床/睡觉、checkin 回填前置
       - LocalViewMixin    本地读今日 md，输出查看类回复
       - ImageMixin        图片消息：多模态描述 → 走 record.add
       - DispatcherMixin   决策与分发（_llm_unified_decide / _apply_unified_decision）
@@ -1230,6 +1233,9 @@ class Handler(
             return
 
         if await self._maybe_handle_agent_permission_reply(text, from_user, context_token):
+            return
+
+        if await self._timeline_preprocess(text, from_user, context_token):
             return
 
         # 个人使用不发斜杠命令；以 / 开头的统一忽略，避免被 LLM 当成自然语言乱解释。

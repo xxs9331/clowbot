@@ -34,8 +34,27 @@ opencode:
 vault:
   root: "D:/Lenovo/Documents/世界树/世界树"
   daily_log_dir: "2-Areas/习惯养成/生活日志"
+  # 工作日记（checkin 读上下文用；与 daily_log_dir 分离）
+  diary_dir: "2-Areas/习惯养成/日记"
   project_dir: "1-Projects/生生"
   task_dir: "任务系统"
+
+# ─── 统一日轴（时间轴 + checkin）───
+# 提醒 remind.add 仍只写生活日志「⏰ 提醒」节，不写入时间轴。
+timeline:
+  enabled: false
+  # 必填：时间轴文件根目录，通常与 vault.root 相同（须显式写出，不设隐式回退）
+  root_dir: "D:/Lenovo/Documents/世界树/世界树"
+  timeline_dir: "2-Areas/习惯养成/时间轴"
+  # 必填：相对 vault.root，checkin 状态 JSON 所在目录
+  state_dir: "3-Resources/工具集/.bot_state"
+  slot_minutes: 30
+  append_separator: "|"
+  # 阶段 C 再开；与 scheduler/reminders.py 并行
+  checkin_enabled: false
+  # checkin 读项目压力（相对 vault.root）
+  project_overview_path: "1-Projects/项目进度总览.md"
+  checkin_ai_timeout_sec: 12
 
 # ─── 生生项目分类 ───
 categories:
@@ -50,6 +69,13 @@ bot:
   reply_on_error: true           # 出错时告知用户
   typing_indicator: true         # 处理中显示"正在输入"
   max_reply_length: 2000         # 回复最大长度（微信限制）
+  # 定时提醒推送前可选经大模型润色（独立 ACP session；失败则回退原文）
+  reminder_polish_enabled: false
+  reminder_polish_timeout_sec: 8
+  # 为空则沿用 opencode.model
+  reminder_polish_model: ""
+  # 预留：>0 时未来可拼接日记片段作上下文；首版实现为 0（不读日志正文）
+  reminder_polish_context_chars: 0
   # 工具中间态提示（executing/result_ready/done），默认关闭避免刷屏
   tool_progress_messages: false
   tool_progress_min_interval_sec: 0.8
