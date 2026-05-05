@@ -34,3 +34,13 @@ def test_collect_errors_slot_minutes_not_30():
         "timeline": {**minimal_timeline("/x"), "slot_minutes": 15},
     }
     assert any("slot_minutes" in e for e in collect_config_errors(cfg))
+
+
+def test_collect_errors_checkin_poll_interval_invalid():
+    base = {"vault": minimal_vault("/x"), "timeline": minimal_timeline("/x")}
+    assert collect_config_errors(base) == []
+    cfg_bad = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_poll_interval_sec": 5},
+    }
+    assert any("checkin_poll_interval" in e for e in collect_config_errors(cfg_bad))

@@ -57,9 +57,14 @@ def slot_at(dt: datetime) -> str:
 
 
 def last_completed_slot_at_boundary(now: datetime | None = None) -> str:
-    """在整点或半点触发时，返回「刚结束」的半格起点 HH:MM。
+    """返回「与 ``now`` 对齐的上一半格」的起点标签 ``HH:MM``（实现为 ``slot_at(now-30min)``）。
 
-    例：10:30 触发 → 刚结束的是 10:00–10:30 → 返回 ``10:00``。
+    **仅在 ``now`` 落在整点或半点时**，这与口语「本轮 tick 刚结束的那 30 分钟」一致，例如：
+
+    - ``10:30`` 触发 → 刚结束的是 ``10:00``–``10:30`` → 返回 ``10:00``；
+    - ``22:00`` 触发 → 刚结束的是 ``21:30``–``22:00`` → 返回 ``21:30``。
+
+    若在**非**整点半点调用（例如固定每 N 秒轮询），同一公式会变成「``now`` 往前 30 分钟落在哪一格」，与「当前钟点刚结束的那一格」可能不一致；checkin 在 ``checkin_poll_interval_sec==0`` 时只在整点半点醒来，故与「整点半点」语义对齐。
     """
     now = now or datetime.now()
     ns = now.replace(second=0, microsecond=0)
@@ -112,6 +117,19 @@ def is_slot_empty(cfg: dict, slot_hhmm: str, dt: datetime | None = None) -> bool
         return True
     slots = _parse_slot_lines(text)
     return not (slots.get(slot_hhmm, "").strip())
+
+
+def get_slot_body(cfg: dict, slot_hhmm: str, dt: datetime | None = None) -> str:
+    """读取指定半格已有正文（strip 后）；无文件或无该行视为空字符串。"""
+    path = timeline_path(cfg, dt)
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    slots = _parse_slot_lines(text)
+    return (slots.get(slot_hhmm, "") or "").strip()
 
 
 def get_last_non_empty_slot(cfg: dict, dt: datetime | None = None) -> str:

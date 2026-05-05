@@ -40,9 +40,18 @@ def test_upsert_fill_and_append(cfg):
     assert ts.is_slot_empty(cfg, "10:00", dt)
     assert ts.upsert_timeline_slot(cfg, "10:00", "A", dt=dt)
     assert not ts.is_slot_empty(cfg, "10:00", dt)
+    assert ts.get_slot_body(cfg, "10:00", dt) == "A"
     assert ts.upsert_timeline_slot(cfg, "10:00", "B", dt=dt)
+    assert ts.get_slot_body(cfg, "10:00", dt) == "A | B"
     text = ts.timeline_path(cfg, dt).read_text(encoding="utf-8")
     assert "10:00" in text and "A" in text and "B" in text and "|" in text
+
+
+def test_get_slot_body_empty_and_missing(cfg):
+    dt = datetime(2026, 5, 4, 11, 0)
+    assert ts.get_slot_body(cfg, "11:00", dt) == ""
+    ts.ensure_timeline_file(cfg, dt)
+    assert ts.get_slot_body(cfg, "11:00", dt) == ""
 
 
 def test_last_completed_slot_at_boundary():
@@ -61,3 +70,18 @@ def test_get_last_non_empty_slot(cfg):
     ts.upsert_timeline_slot(cfg, "12:00", "午饭", dt=dt)
     last = ts.get_last_non_empty_slot(cfg, dt)
     assert "午饭" in last
+
+
+def test_slot_at_semantics():
+    """slot_at 返回当前时刻所在半格起点 HH:MM。"""
+    # 整点 → 整点
+    assert ts.slot_at(datetime(2026, 5, 4, 10, 0, 0)) == "10:00"
+    # 半点 → 半点
+    assert ts.slot_at(datetime(2026, 5, 4, 10, 30, 0)) == "10:30"
+    # 任意分钟向下取整到 0
+    assert ts.slot_at(datetime(2026, 5, 4, 10, 17, 45)) == "10:00"
+    # 任意分钟向下取整到 30
+    assert ts.slot_at(datetime(2026, 5, 4, 10, 44, 12)) == "10:30"
+    # 跨天边界
+    assert ts.slot_at(datetime(2026, 5, 4, 0, 5, 0)) == "00:00"
+    assert ts.slot_at(datetime(2026, 5, 4, 23, 45, 0)) == "23:30"

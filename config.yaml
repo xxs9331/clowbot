@@ -30,12 +30,13 @@ timeline:
   enabled: true
   root_dir: "D:/Lenovo/Documents/世界树/世界树"
   timeline_dir: "2-Areas/习惯养成/时间轴"
-  state_dir: "3-Resources/工具集/.bot_state"
+  state_dir: "@bot"
   slot_minutes: 30
   append_separator: "|"
   checkin_enabled: true
   project_overview_path: "1-Projects/项目进度总览.md"
   checkin_ai_timeout_sec: 12
+  checkin_poll_interval_sec: 0
 
 # ─── 生生项目分类 ───
 categories:

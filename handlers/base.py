@@ -15,6 +15,8 @@ from utils.intent import (
     detect_intent,
 )
 from utils.flow_log import log_flow_event, snapshot_todo_queue
+from utils.timeline_state import mark_daily_opening_chat
+from utils.timeline_sync import timeline_enabled
 from utils.route_fast import build_fast_unified_decision
 from utils.tool_names import TOOL_TODO_DONE_CURRENT
 from wechat.client import ClawBotClient
@@ -38,7 +40,7 @@ class Handler(
     """ClawBot 业务总入口（Mixin 组合）。
 
     Mixin 职责：
-      - TimelineHooksMixin 时间轴起床/睡觉、checkin 回填前置
+      - TimelineHooksMixin 时间轴睡觉、checkin 回填前置（起床=每日首条微信，见 handle）
       - LocalViewMixin    本地读今日 md，输出查看类回复
       - ImageMixin        图片消息：多模态描述 → 走 record.add
       - DispatcherMixin   决策与分发（_llm_unified_decide / _apply_unified_decision）
@@ -1234,6 +1236,18 @@ class Handler(
 
         if await self._maybe_handle_agent_permission_reply(text, from_user, context_token):
             return
+
+        tl = self.cfg.get("timeline") or {}
+        if timeline_enabled(self.cfg) and bool(tl.get("checkin_enabled")):
+            r = mark_daily_opening_chat(self.cfg, from_user)
+            if r == "woke":
+                log_flow_event(
+                    stage="checkin",
+                    route="first_chat_wake",
+                    user_text=text[:200],
+                    from_user=from_user,
+                    session_id=self.session_id,
+                )
 
         if await self._timeline_preprocess(text, from_user, context_token):
             return

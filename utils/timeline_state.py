@@ -1,4 +1,4 @@
-"""Checkin 活跃/休眠状态与轮询去重，持久化在 vault 下 .bot_state。"""
+"""Checkin 活跃/休眠状态与轮询去重，持久化在 vault 子目录或 @bot 本地。"""
 
 from __future__ import annotations
 
@@ -8,16 +8,25 @@ from pathlib import Path
 from typing import Any
 
 _STATE_FILE = "timeline_checkin_state.json"
+# .clawbot/ 根（本文件在 utils/ 下）
+_BOT_ROOT = Path(__file__).resolve().parent.parent
 
 _mode_lock: dict[str, Any] = {}  # path -> threading.Lock，延迟导入 threading 避免循环
 
 
 def _state_path(cfg: dict) -> Path:
-    """状态文件目录：``vault.root`` / ``timeline.state_dir`` / ``timeline_checkin_state.json``。"""
-    root = Path(str((cfg.get("vault") or {}).get("root") or "").strip()).resolve()
+    """状态文件路径。
+
+    - ``timeline.state_dir`` 为 ``@bot`` / ``@package``：``<.clawbot>/timeline_checkin_state.json``（与 vault 分离，便于本机调试）。
+    - 否则：``vault.root`` / ``state_dir`` / ``timeline_checkin_state.json``。
+    """
     tl = cfg.get("timeline") or {}
-    rel = str(tl.get("state_dir") or "").strip().strip("/\\").replace("\\", "/")
-    return root / rel / _STATE_FILE
+    rel = str(tl.get("state_dir") or "").strip()
+    if rel.lower() in ("@bot", "@package"):
+        return (_BOT_ROOT / _STATE_FILE).resolve()
+    root = Path(str((cfg.get("vault") or {}).get("root") or "").strip()).resolve()
+    rel_norm = rel.strip("/\\").replace("\\", "/")
+    return (root / rel_norm / _STATE_FILE).resolve()
 
 
 def _ensure_dir(path: Path) -> None:
@@ -118,3 +127,29 @@ def get_checkin_expect(cfg: dict, user_id: str) -> dict | None:
         return None
     v = exp.get(user_id)
     return v if isinstance(v, dict) else None
+
+
+def mark_daily_opening_chat(cfg: dict, user_id: str) -> str:
+    """同一用户当天首条消息：若仍为 ``sleep`` 则切 ``active``（视为起床）。
+
+    返回 ``woke`` | ``noop`` | ``no_user``。不拦截消息，由主路由继续处理。
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        return "no_user"
+    today = datetime.now().strftime("%Y-%m-%d")
+    st = _read_state(cfg)
+    by_user = st.get("first_chat_date_by_user")
+    if not isinstance(by_user, dict):
+        by_user = {}
+    if by_user.get(uid) == today:
+        return "noop"
+    mode = str(st.get("mode") or "sleep").strip().lower() or "sleep"
+    woke = mode == "sleep"
+    if woke:
+        st["mode"] = "active"
+    by_user[uid] = today
+    st["first_chat_date_by_user"] = by_user
+    st["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    _write_state(cfg, st)
+    return "woke" if woke else "noop"

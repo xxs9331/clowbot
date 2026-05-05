@@ -1,4 +1,6 @@
-"""时间轴：起床/睡觉状态、checkin 用户回填、与主路由前置拦截。"""
+"""时间轴：睡觉（显式）、checkin 用户回填、与主路由前置拦截。
+
+「起床」由 Handler 在每日首条微信时自动切 active，不在此写时间轴。"""
 
 from __future__ import annotations
 
@@ -76,27 +78,7 @@ class TimelineHooksMixin:
         if not t:
             return False
 
-        wake_markers = ("起床了", "我起床了", "起床啦", "醒了", "我醒了", "起来了")
         sleep_markers = ("睡觉了", "睡了", "晚安", "准备睡了", "我先睡了", "去睡了")
-
-        if any(m in t for m in wake_markers) and not any(m in t for m in sleep_markers):
-            set_state(self.cfg, "active")
-            now = datetime.now()
-            slot = slot_at(now)
-            upsert_timeline_slot(self.cfg, slot, "起床", dt=now)
-            log_flow_event(
-                stage="checkin",
-                route="wake_active",
-                user_text=t,
-                from_user=from_user,
-                extra={"slot": slot},
-            )
-            await self.wx.send_text(
-                "收到，已标记为「活跃」～半小时格子我会帮你盯状态；困了发「睡觉了」即可休眠。",
-                from_user,
-                context_token,
-            )
-            return True
 
         if any(m in t for m in sleep_markers):
             set_state(self.cfg, "sleep")
@@ -111,7 +93,7 @@ class TimelineHooksMixin:
                 extra={"slot": slot},
             )
             await self.wx.send_text(
-                "收到，已休眠 checkin～明天「起床了」再叫我。",
+                "收到，已休眠 checkin～明天你发来第一条微信消息会自动再开启催办。",
                 from_user,
                 context_token,
             )

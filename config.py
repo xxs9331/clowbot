@@ -68,6 +68,17 @@ def collect_config_errors(cfg: dict) -> list[str]:
             float(tl.get("checkin_ai_timeout_sec"))
         except (TypeError, ValueError):
             errors.append("timeline.checkin_ai_timeout_sec must be a number")
+        poll = tl.get("checkin_poll_interval_sec", None)
+        if poll is not None and poll != "":
+            try:
+                pv = float(poll)
+            except (TypeError, ValueError):
+                errors.append("timeline.checkin_poll_interval_sec must be a number")
+            else:
+                if pv < 0:
+                    errors.append("timeline.checkin_poll_interval_sec must be >= 0")
+                elif 0 < pv < 10:
+                    errors.append("timeline.checkin_poll_interval_sec if >0 must be >= 10")
 
     return errors
 

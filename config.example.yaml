@@ -46,7 +46,7 @@ timeline:
   # 必填：时间轴文件根目录，通常与 vault.root 相同（须显式写出，不设隐式回退）
   root_dir: "D:/Lenovo/Documents/世界树/世界树"
   timeline_dir: "2-Areas/习惯养成/时间轴"
-  # 必填：相对 vault.root，checkin 状态 JSON 所在目录
+  # 必填：相对 vault.root，checkin 状态 JSON 所在目录；填 @bot 则写在 .clawbot 根目录 timeline_checkin_state.json
   state_dir: "3-Resources/工具集/.bot_state"
   slot_minutes: 30
   append_separator: "|"
@@ -55,6 +55,8 @@ timeline:
   # checkin 读项目压力（相对 vault.root）
   project_overview_path: "1-Projects/项目进度总览.md"
   checkin_ai_timeout_sec: 12
+  # 0 或未写：对齐整点/半点；>0 时每 N 秒轮询一次（调试用，如 300=5 分钟；最小 10）
+  checkin_poll_interval_sec: 0
 
 # ─── 生生项目分类 ───
 categories:
