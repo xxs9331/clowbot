@@ -85,6 +85,20 @@ def collect_config_errors(cfg: dict) -> list[str]:
         cwi = tl.get("checkin_write_if_filled", False)
         if not isinstance(cwi, bool):
             errors.append("timeline.checkin_write_if_filled must be true or false")
+        if "compact_enabled" not in tl:
+            errors.append("timeline.compact_enabled is required (true or false)")
+        elif not isinstance(tl.get("compact_enabled"), bool):
+            errors.append("timeline.compact_enabled must be true or false")
+        if "compact_max_chars" not in tl:
+            errors.append("timeline.compact_max_chars is required")
+        else:
+            try:
+                cmc = int(tl.get("compact_max_chars"))
+            except (TypeError, ValueError):
+                errors.append("timeline.compact_max_chars must be an integer")
+            else:
+                if cmc < 10 or cmc > 200:
+                    errors.append("timeline.compact_max_chars must be between 10 and 200 inclusive")
 
     return errors
 

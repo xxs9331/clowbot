@@ -12,6 +12,7 @@ from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
 from utils.flow_log import log_flow_event
 from utils.time_utils import time_str
+from utils.timeline_compact import compact_timeline_line
 from utils.tool_names import DOMAIN_RECORD, TOOL_RECORD_ADD
 
 
@@ -75,8 +76,17 @@ class RecordCoachMixin:
                 else:
                     tdt = datetime.now()
                 slot = slot_for_hhmm(now_hm, tdt)
-                line = f"{category}·{text}" if category else text
-                upsert_timeline_slot(self.cfg, slot, line, dt=tdt)
+                tl_raw = str(payload.get("timeline_line") or "").strip()
+                line_src = tl_raw if tl_raw else (f"{category}·{text}" if category else text)
+                line = await compact_timeline_line(
+                    self.acp,
+                    self.cfg,
+                    self.unified_session_id,
+                    line_src,
+                    trace_tag="record_timeline_compact",
+                )
+                if line:
+                    upsert_timeline_slot(self.cfg, slot, line, dt=tdt)
         except Exception as e:
             log_flow_event(
                 stage="timeline",

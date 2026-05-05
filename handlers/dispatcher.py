@@ -23,6 +23,7 @@ from utils.tool_names import (
     TOOL_DECISION_NONE,
     TOOL_RECORD_ADD,
     TOOL_REMIND_ADD,
+    TOOL_TIMELINE_APPEND,
     TOOL_TODO_ABANDON_CURRENT,
     TOOL_TODO_DONE_CURRENT,
     TOOL_TODO_MERGE_NEW_ITEMS,
@@ -94,6 +95,7 @@ _UNIFIED_TOOLS = (
     TOOL_TODO_ABANDON_CURRENT,
     TOOL_RECORD_ADD,
     TOOL_REMIND_ADD,
+    TOOL_TIMELINE_APPEND,
     TOOL_DECISION_NONE,
 )
 
@@ -154,6 +156,8 @@ class DispatcherMixin:
             out.append(TOOL_REMIND_ADD)
         if any(k in t for k in ("记录", "记一下", "改签", "体重", "跑步", "快递")):
             out.append(TOOL_RECORD_ADD)
+        if any(k in t for k in ("追加到时间轴", "追加时间轴", "追加到时间线")):
+            out.append(TOOL_TIMELINE_APPEND)
         if any(k in t for k in ("待办", "下一个", "做完", "跳过", "放弃", "重排")):
             out.extend(
                 [
@@ -225,6 +229,7 @@ class DispatcherMixin:
             f'{TOOL_TODO_SKIP_CURRENT} | {TOOL_TODO_ABANDON_CURRENT}\n'
             f'  生活记录：{TOOL_RECORD_ADD}\n'
             f'  设/加提醒：{TOOL_REMIND_ADD}\n'
+            f'  时间轴追加：{TOOL_TIMELINE_APPEND}\n'
             f'  不处理：{TOOL_DECISION_NONE}\n'
             "- payload: 对象（见下）\n"
             "- reply: 可选，给用户的微信短句\n\n"
@@ -232,9 +237,11 @@ class DispatcherMixin:
             f'- "{TOOL_TODO_MERGE_NEW_ITEMS}": {{"tasks": ["项1", ...]}}\n'
             f'- "{TOOL_TODO_REORDER}": {{"reorder": [...]}}，元素集合须与 remaining_tasks 相同，仅顺序可变\n'
             f'- 其它 todo.*：通常为 {{}}\n'
-            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?"}}\n'
-            f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n\n'
+            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", "timeline_line": "可选，已为时间轴准备好的短句"}}\n'
+            f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
+            f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}（slot 省略则用当前半格）\n\n'
             "分流：\n"
+            f'- 用户明确要求追加到时间轴/追加时间轴/附带「追加到时间轴：…」且要写盘 → {TOOL_TIMELINE_APPEND}（优先于仅写生活日志）\n'
             f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
             f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点（如两点、14:00）且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录）\n'
@@ -321,15 +328,18 @@ class DispatcherMixin:
             f'{TOOL_TODO_SKIP_CURRENT} | {TOOL_TODO_ABANDON_CURRENT}\n'
             f'  生活记录：{TOOL_RECORD_ADD}\n'
             f'  设/加提醒：{TOOL_REMIND_ADD}\n'
+            f'  时间轴追加：{TOOL_TIMELINE_APPEND}\n'
             f'  不处理：{TOOL_DECISION_NONE}\n'
             "- payload: 对象（见下）\n\n"
             "payload 约定：\n"
             f'- "{TOOL_TODO_MERGE_NEW_ITEMS}": {{"tasks": ["项1", ...]}}\n'
             f'- "{TOOL_TODO_REORDER}": {{"reorder": [...]}}，元素集合须与 remaining_tasks 相同，仅顺序可变\n'
             f'- 其它 todo.*：通常为 {{}}\n'
-            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?"}}\n'
-            f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n\n'
+            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", "timeline_line": "可选"}}\n'
+            f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
+            f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}\n\n'
             "分流规则：\n"
+            f'- 明确要求追加到时间轴/追加时间轴（须带可落盘内容）→ {TOOL_TIMELINE_APPEND}，与仅写生活日志的 {TOOL_RECORD_ADD} 区分；前者优先\n'
             f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
             f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录；与「过去半小时在做什么」类状态句区分）\n'

@@ -24,4 +24,6 @@ def minimal_timeline(root_dir: str, *, enabled: bool = False) -> dict:
         "checkin_enabled": False,
         "project_overview_path": "overview.md",
         "checkin_ai_timeout_sec": 12,
+        "compact_enabled": True,
+        "compact_max_chars": 80,
     }

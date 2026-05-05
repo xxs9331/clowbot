@@ -23,6 +23,7 @@ TOOL_TODO_ABANDON_CURRENT = "todo.abandon_current"
 
 TOOL_RECORD_ADD = "record.add"
 TOOL_REMIND_ADD = "remind.add"
+TOOL_TIMELINE_APPEND = "timeline.append"
 
 TODO_COACH_TOOLS = frozenset(
     {
@@ -52,6 +53,7 @@ ALL_DOMAINS = (DOMAIN_TODO, DOMAIN_RECORD, DOMAIN_REMIND)
 # ─── 旧名兼容（LLM 输出旧名时由 dispatcher.normalize 自动映射到新名）───
 # 不要给"看起来不像是旧名"的字符串加映射；必须确实是上一代代码 / SKILL 用过的。
 LEGACY_TOOL_ALIASES: dict[str, str] = {
+    "追加到时间轴": TOOL_TIMELINE_APPEND,
     "life_log": TOOL_RECORD_ADD,
     "merge_new_items": TOOL_TODO_MERGE_NEW_ITEMS,
     "done_current": TOOL_TODO_DONE_CURRENT,

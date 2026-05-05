@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 
 from utils.flow_log import log_flow_event
+from utils.timeline_compact import compact_timeline_line
 from utils.timeline_state import get_checkin_expect, get_state, pop_checkin_expect, set_state
 from utils.timeline_sync import (
     get_slot_body,
@@ -16,8 +17,30 @@ from utils.timeline_sync import (
     slot_at,
 )
 
+# checkin 回填：已有内容时须显式带此语才追加（与 scheduler 提示文案一致）
+_CHECKIN_APPEND_MARK = "追加到时间轴"
+
+
+def _parse_checkin_reply_text(raw: str) -> tuple[str, bool]:
+    """``(正文, 是否含显式追加意图)``；去掉标记并压空白。"""
+    t = (raw or "").strip()
+    if _CHECKIN_APPEND_MARK not in t:
+        return t, False
+    collapsed = " ".join(t.replace(_CHECKIN_APPEND_MARK, " ").split())
+    return collapsed.strip(), True
+
 
 class TimelineHooksMixin:
+    async def _compact_checkin_reply(self, raw: str) -> str:
+        """checkin 回填正文：按 timeline.compact_enabled 决定是否走 ACP 短版。"""
+        return await compact_timeline_line(
+            self.acp,
+            self.cfg,
+            self.unified_session_id,
+            raw,
+            trace_tag="checkin_compact",
+        )
+
     async def _timeline_preprocess(
         self, text: str, from_user: str, context_token: str
     ) -> bool:
@@ -59,19 +82,20 @@ class TimelineHooksMixin:
             pop_checkin_expect(self.cfg, from_user)
             return False
 
-        body = (text or "").strip()
-        if not body:
+        body_raw = (text or "").strip()
+        if not body_raw:
             return False
 
-        pop_checkin_expect(self.cfg, from_user)
+        body_clean, explicit_append = _parse_checkin_reply_text(body_raw)
         tl = self.cfg.get("timeline") or {}
         allow_append_when_filled = bool(tl.get("checkin_write_if_filled", False))
         existing = get_slot_body(self.cfg, slot, dt=tdt)
-        if existing and not allow_append_when_filled:
+
+        if existing and not allow_append_when_filled and not explicit_append:
             log_flow_event(
                 stage="timeline",
                 route="checkin_skip_filled_no_append",
-                user_text=body,
+                user_text=body_raw,
                 from_user=from_user,
                 extra={"slot": slot, "existing": existing[:120]},
             )
@@ -82,7 +106,29 @@ class TimelineHooksMixin:
             )
             return True
 
-        upsert_timeline_slot(self.cfg, slot, body, dt=tdt)
+        if existing and not allow_append_when_filled and explicit_append and not body_clean:
+            await self.wx.send_text(
+                "请写出要追加到该格的正文～",
+                from_user,
+                context_token,
+            )
+            return True
+
+        source_for_slot = (
+            body_clean if explicit_append else body_raw
+        ).strip()
+        if not source_for_slot:
+            return False
+
+        pop_checkin_expect(self.cfg, from_user)
+        compact_body = await self._compact_checkin_reply(source_for_slot)
+        if not compact_body:
+            await self.wx.send_text(
+                "压缩后为空，本条未写入时间轴。", from_user, context_token
+            )
+            return True
+
+        upsert_timeline_slot(self.cfg, slot, compact_body, dt=tdt)
         await self.wx.send_text(
             f"已记到时间轴 {slot}～",
             from_user,
@@ -103,7 +149,16 @@ class TimelineHooksMixin:
             set_state(self.cfg, "sleep")
             now = datetime.now()
             slot = slot_at(now)
-            upsert_timeline_slot(self.cfg, slot, "🌙 睡觉", dt=now)
+            line = await compact_timeline_line(
+                self.acp,
+                self.cfg,
+                self.unified_session_id,
+                "🌙 睡觉",
+                trace_tag="sleep_compact",
+            )
+            if not line:
+                line = "🌙 睡觉"
+            upsert_timeline_slot(self.cfg, slot, line, dt=now)
             log_flow_event(
                 stage="checkin",
                 route="user_sleep",

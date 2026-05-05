@@ -21,7 +21,7 @@ from utils.route_fast import build_fast_unified_decision
 from utils.tool_names import TOOL_TODO_DONE_CURRENT
 from wechat.client import ClawBotClient
 
-from .coaches import RecordCoachMixin, RemindCoachMixin, TodoCoachMixin
+from .coaches import RecordCoachMixin, RemindCoachMixin, TimelineAppendMixin, TodoCoachMixin
 from .dispatcher import DispatcherMixin, _coalesce_unified_decision
 from .image import ImageMixin
 from .local_view import LocalViewMixin
@@ -36,6 +36,7 @@ class Handler(
     TodoCoachMixin,
     RecordCoachMixin,
     RemindCoachMixin,
+    TimelineAppendMixin,
 ):
     """ClawBot 业务总入口（Mixin 组合）。
 
@@ -47,6 +48,7 @@ class Handler(
       - TodoCoachMixin    待办 8 个 coach + 内存队列
       - RecordCoachMixin  生活记录写入
       - RemindCoachMixin  提醒写入（写完由 hooks 自动唤醒调度器）
+      - TimelineAppendMixin  timeline.append 显式追加时间轴
 
     共享状态（按读写者标注）：
       - _reminded_ids:        set[str]                    scheduler/reminders 读写（写后行去重）

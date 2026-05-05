@@ -39,6 +39,8 @@ timeline:
   checkin_poll_interval_sec: 0
   write_policy: "whitelist_only"
   checkin_write_if_filled: false
+  compact_enabled: true
+  compact_max_chars: 80
 
 # ─── 生生项目分类 ───
 categories:

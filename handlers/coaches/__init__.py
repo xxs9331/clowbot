@@ -4,8 +4,10 @@
 登记到 dispatcher 表，避免 dispatcher → coaches 的反向 import。
 """
 
+from . import timeline as _timeline_coach  # noqa: F401 — 注册 timeline.append
 from .record import RecordCoachMixin
+from .timeline import TimelineAppendMixin
 from .remind import RemindCoachMixin
 from .todo import TodoCoachMixin
 
-__all__ = ["TodoCoachMixin", "RecordCoachMixin", "RemindCoachMixin"]
+__all__ = ["TodoCoachMixin", "RecordCoachMixin", "RemindCoachMixin", "TimelineAppendMixin"]

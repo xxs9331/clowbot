@@ -95,6 +95,8 @@ def build_coach_write_prompt(
     skill_path = meta["skill_path_fn"](vault_root)
     today_log = str(get_log_path(vault_root, daily_log_dir))
     payload_out: dict[str, Any] = dict(payload or {})
+    if domain == DOMAIN_RECORD:
+        payload_out.setdefault("timeline_line", None)
     if domain == DOMAIN_TODO:
         op = str(payload_out.get("op") or "")
         if op == "rewrite_section_flat":

@@ -60,3 +60,19 @@ def test_collect_errors_checkin_write_if_filled_type():
         "timeline": {**minimal_timeline("/x"), "checkin_write_if_filled": "false"},
     }
     assert any("checkin_write_if_filled" in e for e in collect_config_errors(cfg))
+
+
+def test_collect_errors_compact_max_chars_out_of_range():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "compact_max_chars": 5},
+    }
+    assert any("compact_max_chars" in e for e in collect_config_errors(cfg))
+
+
+def test_collect_errors_compact_enabled_type():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "compact_enabled": "yes"},
+    }
+    assert any("compact_enabled" in e for e in collect_config_errors(cfg))

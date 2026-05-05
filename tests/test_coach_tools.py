@@ -57,7 +57,10 @@ def test_build_coach_write_prompt_three_domains(
         assert "至多 **5** 个子项" not in prompt
     env = _extract_envelope(prompt)
     assert env["tool"] == expect_tool
-    assert env["payload"] == payload
+    expected_payload = dict(payload)
+    if domain == DOMAIN_RECORD:
+        expected_payload["timeline_line"] = None
+    assert env["payload"] == expected_payload
     assert env["output_contract"] == OUTPUT_WRITE_CONFIRM
     assert expect_skill_substr in env["skill_path"].replace("\\", "/")
     assert _FAKE_LOG_DIR.replace("/", "\\") in env["today_log"] or _FAKE_LOG_DIR in env[
