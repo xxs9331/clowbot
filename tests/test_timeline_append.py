@@ -83,7 +83,8 @@ def test_append_default_slot(append_cfg: dict, monkeypatch: pytest.MonkeyPatch) 
     asyncio.run(run())
 
     assert get_slot_body(append_cfg, "14:00", fixed) == "一行摘要"
-    assert h.wx.messages and "14:00" in h.wx.messages[-1][0]
+    last = h.wx.messages[-1][0]
+    assert "14:00" in last and "一行摘要" in last
 
 
 def test_append_explicit_slot(append_cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,3 +110,4 @@ def test_append_explicit_slot(append_cfg: dict, monkeypatch: pytest.MonkeyPatch)
     asyncio.run(run())
 
     assert get_slot_body(append_cfg, "08:30", dt) == "一行摘要"
+    assert "一行摘要" in h.wx.messages[-1][0]

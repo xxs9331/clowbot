@@ -156,7 +156,9 @@ class DispatcherMixin:
             out.append(TOOL_REMIND_ADD)
         if any(k in t for k in ("记录", "记一下", "改签", "体重", "跑步", "快递")):
             out.append(TOOL_RECORD_ADD)
-        if any(k in t for k in ("追加到时间轴", "追加时间轴", "追加到时间线")):
+        if t.startswith("追加") or any(
+            k in t for k in ("追加到时间轴", "追加时间轴", "追加到时间线")
+        ):
             out.append(TOOL_TIMELINE_APPEND)
         if any(k in t for k in ("待办", "下一个", "做完", "跳过", "放弃", "重排")):
             out.extend(
@@ -241,7 +243,7 @@ class DispatcherMixin:
             f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
             f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}（slot 省略则用当前半格）\n\n'
             "分流：\n"
-            f'- 用户明确要求追加到时间轴/追加时间轴/附带「追加到时间轴：…」且要写盘 → {TOOL_TIMELINE_APPEND}（优先于仅写生活日志）\n'
+            f'- 用户明确要求写时间轴追加：以「追加」开头的状态句，或「追加到时间轴/追加时间轴」等旧说法，且要写盘 → {TOOL_TIMELINE_APPEND}（优先于仅写生活日志）\n'
             f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
             f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点（如两点、14:00）且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录）\n'
@@ -339,7 +341,7 @@ class DispatcherMixin:
             f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
             f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}\n\n'
             "分流规则：\n"
-            f'- 明确要求追加到时间轴/追加时间轴（须带可落盘内容）→ {TOOL_TIMELINE_APPEND}，与仅写生活日志的 {TOOL_RECORD_ADD} 区分；前者优先\n'
+            f'- 明确要求时间轴追加：句首「追加…」或追加到时间轴/追加时间轴（须带可落盘内容）→ {TOOL_TIMELINE_APPEND}，与仅写生活日志的 {TOOL_RECORD_ADD} 区分；前者优先\n'
             f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
             f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录；与「过去半小时在做什么」类状态句区分）\n'

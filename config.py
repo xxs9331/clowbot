@@ -85,6 +85,18 @@ def collect_config_errors(cfg: dict) -> list[str]:
         cwi = tl.get("checkin_write_if_filled", False)
         if not isinstance(cwi, bool):
             errors.append("timeline.checkin_write_if_filled must be true or false")
+        cbp = tl.get("checkin_meta_bypass_phrases", None)
+        if cbp is not None:
+            if not isinstance(cbp, list):
+                errors.append("timeline.checkin_meta_bypass_phrases must be a list of strings")
+            else:
+                if len(cbp) > 64:
+                    errors.append("timeline.checkin_meta_bypass_phrases must have at most 64 entries")
+                for i, item in enumerate(cbp):
+                    if not isinstance(item, str) or not item.strip():
+                        errors.append(
+                            f"timeline.checkin_meta_bypass_phrases[{i}] must be a non-empty string"
+                        )
         if "compact_enabled" not in tl:
             errors.append("timeline.compact_enabled is required (true or false)")
         elif not isinstance(tl.get("compact_enabled"), bool):

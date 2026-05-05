@@ -15,6 +15,7 @@ from utils import timeline_sync as ts
 from utils.timeline_state import (
     get_checkin_expect,
     get_last_ping,
+    set_checkin_expect,
     set_state,
 )
 from utils.timeline_sync import get_slot_body
@@ -73,6 +74,24 @@ def test_empty_slot_sets_expect_and_ping(checkin_cfg: dict) -> None:
     assert len(h.wx.messages) == 1
 
 
+def test_filled_ping_clears_stale_checkin_expect(checkin_cfg: dict) -> None:
+    """上一轮空格催填留下的 expect，在下一轮「已填格概括」后应清除，避免误写旧半格。"""
+    set_state(checkin_cfg, "active")
+    h = _Handler(checkin_cfg)
+    dt = datetime(2026, 5, 4, 10, 0, 0)
+    ts.ensure_timeline_file(checkin_cfg, dt)
+    ts.upsert_timeline_slot(checkin_cfg, "10:00", "写代码", dt=dt)
+    set_checkin_expect(checkin_cfg, "wx-user-1", "2026-05-04", "09:30")
+
+    async def run() -> None:
+        await _checkin_iteration(h, now=dt)
+
+    asyncio.run(run())
+
+    assert get_checkin_expect(checkin_cfg, "wx-user-1") is None
+    assert len(h.wx.messages) == 1
+
+
 def test_filled_slot_no_expect(checkin_cfg: dict) -> None:
     set_state(checkin_cfg, "active")
     h = _Handler(checkin_cfg)
@@ -89,7 +108,7 @@ def test_filled_slot_no_expect(checkin_cfg: dict) -> None:
     assert get_checkin_expect(checkin_cfg, "wx-user-1") is None
     assert get_last_ping(checkin_cfg) == ("2026-05-04", "10:00")
     assert len(h.wx.messages) == 1
-    assert "追加到时间轴" in h.wx.messages[0][0]
+    assert "追加" in h.wx.messages[0][0]
 
 
 def test_same_slot_skipped_second_time(checkin_cfg: dict) -> None:

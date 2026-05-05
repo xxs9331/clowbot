@@ -17,17 +17,65 @@ from utils.timeline_sync import (
     slot_at,
 )
 
-# checkin 回填：已有内容时须显式带此语才追加（与 scheduler 提示文案一致）
-_CHECKIN_APPEND_MARK = "追加到时间轴"
+# checkin 回填：已有内容时须显式追加意图（与 scheduler 提示一致）
+_CHECKIN_APPEND_LEGACY = "追加到时间轴"
+_CHECKIN_APPEND_PREFIX = "追加"
+
+
+def _normalize_checkin_meta_token(t: str) -> str:
+    """整句去空白与常见句末标点，用于与元指令表精确匹配。"""
+    return (t or "").strip().rstrip("。！？!?.").strip()
+
+
+def _checkin_meta_bypass_phrases(cfg: dict) -> frozenset[str]:
+    """默认 + ``timeline.checkin_meta_bypass_phrases`` 合并（均已规范化）。"""
+    base = {
+        "查看时间轴",
+        "看时间轴",
+        "查时间轴",
+        "查看日志",
+        "看日志",
+        "查看日记",
+        "查看记录",
+        "忽略",
+        "稍后",
+        "等会",
+    }
+    out = {_normalize_checkin_meta_token(x) for x in base if _normalize_checkin_meta_token(x)}
+    tl = cfg.get("timeline") or {}
+    extra = tl.get("checkin_meta_bypass_phrases")
+    if isinstance(extra, list):
+        for x in extra:
+            if isinstance(x, str):
+                nx = _normalize_checkin_meta_token(x)
+                if nx:
+                    out.add(nx)
+    return frozenset(out)
+
+
+def _is_checkin_meta_query(cfg: dict, body_raw: str) -> bool:
+    """签到回填窗口内：纯查看/忽略类短句不写时间轴，交给主路由。"""
+    n = _normalize_checkin_meta_token(body_raw)
+    if not n:
+        return False
+    return n in _checkin_meta_bypass_phrases(cfg)
 
 
 def _parse_checkin_reply_text(raw: str) -> tuple[str, bool]:
-    """``(正文, 是否含显式追加意图)``；去掉标记并压空白。"""
+    """``(正文, 是否含显式追加意图)``；去掉标记并压空白。
+
+    口径：以「追加」开头，或句中含旧版「追加到时间轴」。
+    """
     t = (raw or "").strip()
-    if _CHECKIN_APPEND_MARK not in t:
-        return t, False
-    collapsed = " ".join(t.replace(_CHECKIN_APPEND_MARK, " ").split())
-    return collapsed.strip(), True
+    if not t:
+        return "", False
+    if _CHECKIN_APPEND_LEGACY in t:
+        collapsed = " ".join(t.replace(_CHECKIN_APPEND_LEGACY, " ").split())
+        return collapsed.strip(), True
+    if t.startswith(_CHECKIN_APPEND_PREFIX):
+        rest = t[len(_CHECKIN_APPEND_PREFIX) :].lstrip(" \t　：:，,、")
+        return rest.strip(), True
+    return t, False
 
 
 class TimelineHooksMixin:
@@ -86,6 +134,16 @@ class TimelineHooksMixin:
         if not body_raw:
             return False
 
+        if _is_checkin_meta_query(self.cfg, body_raw):
+            log_flow_event(
+                stage="timeline",
+                route="checkin_skip_meta_query",
+                user_text=body_raw,
+                from_user=from_user,
+                extra={"slot": slot},
+            )
+            return False
+
         body_clean, explicit_append = _parse_checkin_reply_text(body_raw)
         tl = self.cfg.get("timeline") or {}
         allow_append_when_filled = bool(tl.get("checkin_write_if_filled", False))
@@ -100,10 +158,11 @@ class TimelineHooksMixin:
                 extra={"slot": slot, "existing": existing[:120]},
             )
             await self.wx.send_text(
-                f"该格 {slot} 已有记录；如需追加请明确说“追加到时间轴”。",
+                f"该格 {slot} 已有记录；如需追加请以「追加」开头写正文（例：追加 吃了药）。",
                 from_user,
                 context_token,
             )
+            pop_checkin_expect(self.cfg, from_user)
             return True
 
         if existing and not allow_append_when_filled and explicit_append and not body_clean:
@@ -130,7 +189,7 @@ class TimelineHooksMixin:
 
         upsert_timeline_slot(self.cfg, slot, compact_body, dt=tdt)
         await self.wx.send_text(
-            f"已记到时间轴 {slot}～",
+            f"已记到时间轴 {slot}～\n{compact_body}",
             from_user,
             context_token,
         )

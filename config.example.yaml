@@ -61,6 +61,9 @@ timeline:
   write_policy: "whitelist_only"
   # checkin 回复命中已填格时是否仍允许自动追加（默认 false：仅补空格）
   checkin_write_if_filled: false
+  # 可选：checkin 催填窗口内，整句匹配这些「元指令」时不写时间轴、交给主对话（默认见代码）
+  # checkin_meta_bypass_phrases:
+  #   - "仅看轴"
   # 时间轴写入短版：走 ACP 压句；失败按 compact_max_chars 截断
   compact_enabled: true
   compact_max_chars: 80

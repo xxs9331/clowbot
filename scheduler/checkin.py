@@ -1,7 +1,7 @@
 """半小时时间轴 checkin：与 reminders 独立，仅读 vault + AI 建议。
 
 每次轮询使用 slot_at(now) 获取当前半格，不再跳过已填格：
-- 已填格 → 推送概括，用户可不回复
+- 已填格 → 推送概括，用户可不回复；并清除该用户的 checkin_expect（避免上一轮空格催填残留导致误写）
 - 空格 → 推送请求记录，设置 checkin_expect 等待用户回填
 """
 
@@ -16,6 +16,7 @@ from utils.log_sync import get_log_path
 from utils.timeline_state import (
     get_last_ping,
     get_state,
+    pop_checkin_expect,
     set_checkin_expect,
     set_last_ping,
     set_state,
@@ -117,7 +118,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         f"场景：用户在 {slot} 这个时间点已有记录（{slot_preview}），"
         "请简要概括并附 1 条推进建议（可点名下一步拖延项，但不要人身攻击）。\n"
         "语气要像是在轻轻确认，不是在催填空 — 该格已有内容，不需要用户回复即可。\n"
-        "若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加需明确说“追加到时间轴”。\n"
+        "若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加请以「追加」开头写一句正文。\n"
         "不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。\n\n"
         f"当前时间：{ctx['time']}\n"
         f"检查的时间节点：{ctx['slot_checked']}\n"
@@ -141,7 +142,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         short = slot_body[:120] + ("…" if len(slot_body) > 120 else "")
         return (
             f"{slot} 已记录：{short}，继续加油～有需要随时说。"
-            "如需追加到时间轴，请明确说“追加到时间轴”。"
+            "如需追加，请以「追加」开头写正文（例：追加 吃了药）。"
         )
 
     try:
@@ -177,7 +178,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         short = slot_body[:120] + ("…" if len(slot_body) > 120 else "")
         return (
             f"{slot} 已记录：{short}，继续加油～有需要随时说。"
-            "如需追加到时间轴，请明确说“追加到时间轴”。"
+            "如需追加，请以「追加」开头写正文（例：追加 吃了药）。"
         )
 
 
@@ -304,9 +305,12 @@ async def _checkin_iteration(handler, *, now: datetime | None = None) -> None:
         if handler.wx._context_tokens:
             last_user, last_token = list(handler.wx._context_tokens.items())[-1]
             await handler.wx.send_text(msg, last_user, last_token)
+            # 已填格不要求回复；若仍留着上一轮「空格催填」的 expect，下一句闲聊会被误写入旧半格
+            pop_checkin_expect(handler.cfg, last_user)
             sent = True
         elif uid:
             await handler.wx.send_text(msg, uid, "")
+            pop_checkin_expect(handler.cfg, uid)
             sent = True
         if not sent:
             log_flow_event(

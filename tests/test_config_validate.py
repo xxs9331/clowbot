@@ -70,6 +70,22 @@ def test_collect_errors_compact_max_chars_out_of_range():
     assert any("compact_max_chars" in e for e in collect_config_errors(cfg))
 
 
+def test_collect_errors_checkin_meta_bypass_phrases_type():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_meta_bypass_phrases": "查看"},
+    }
+    assert any("checkin_meta_bypass_phrases" in e for e in collect_config_errors(cfg))
+
+
+def test_collect_errors_checkin_meta_bypass_phrases_empty_string():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_meta_bypass_phrases": ["  "]},
+    }
+    assert any("checkin_meta_bypass_phrases[0]" in e for e in collect_config_errors(cfg))
+
+
 def test_collect_errors_compact_enabled_type():
     cfg = {
         "vault": minimal_vault("/x"),

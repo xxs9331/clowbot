@@ -60,6 +60,50 @@ def hook_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     }
 
 
+def test_checkin_meta_bypass_keeps_expect_and_slot_empty(hook_cfg: dict) -> None:
+    """元指令不写轴、不清 expect，下一条仍可正常回填。"""
+    set_state(hook_cfg, "active")
+    tdt = datetime(2026, 5, 4, 10, 0, 0)
+    ts.ensure_timeline_file(hook_cfg, tdt)
+    h = _H(hook_cfg, acp=_ACP(out="不应调用"))
+    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
+
+    async def run() -> None:
+        consumed = await h._maybe_consume_checkin_expect("查看时间轴。", "u1", "tok")
+        assert consumed is False
+
+    asyncio.run(run())
+
+    assert get_slot_body(hook_cfg, "10:00", tdt) == ""
+    assert get_checkin_expect(hook_cfg, "u1") is not None
+    assert h.wx.messages == []
+
+    h2 = _H(hook_cfg, acp=_ACP(out="写代码"))
+
+    async def run2() -> None:
+        await h2._maybe_consume_checkin_expect("在改 bot", "u1", "tok")
+
+    asyncio.run(run2())
+    assert get_slot_body(hook_cfg, "10:00", tdt) == "写代码"
+    assert get_checkin_expect(hook_cfg, "u1") is None
+
+
+def test_checkin_meta_bypass_custom_phrase_from_config(hook_cfg: dict) -> None:
+    hook_cfg["timeline"]["checkin_meta_bypass_phrases"] = ["仅看轴"]
+    set_state(hook_cfg, "active")
+    tdt = datetime(2026, 5, 4, 12, 0, 0)
+    ts.ensure_timeline_file(hook_cfg, tdt)
+    h = _H(hook_cfg)
+    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "12:00")
+
+    async def run() -> None:
+        assert await h._maybe_consume_checkin_expect("仅看轴", "u1", "tok") is False
+
+    asyncio.run(run())
+    assert get_slot_body(hook_cfg, "12:00", tdt) == ""
+    assert get_checkin_expect(hook_cfg, "u1") is not None
+
+
 def test_reply_goes_to_expect_slot_not_current_time(hook_cfg: dict) -> None:
     set_state(hook_cfg, "active")
     tdt = datetime(2026, 5, 4, 10, 0, 0)
@@ -74,6 +118,7 @@ def test_reply_goes_to_expect_slot_not_current_time(hook_cfg: dict) -> None:
 
     assert get_slot_body(hook_cfg, "10:00", tdt) == "整理论文"
     assert h.wx.messages and "10:00" in h.wx.messages[0][0]
+    assert "整理论文" in h.wx.messages[0][0]
 
 
 def test_reply_blocked_when_slot_filled(hook_cfg: dict) -> None:
@@ -92,7 +137,8 @@ def test_reply_blocked_when_slot_filled(hook_cfg: dict) -> None:
 
     assert get_slot_body(hook_cfg, "10:00", tdt) == "身体·睡眠7h"
     assert h.wx.messages and "已有记录" in h.wx.messages[0][0]
-    assert get_checkin_expect(hook_cfg, "u1") is not None
+    # 拒绝写入后应清除 expect，避免后续每条消息都被当 checkin 消费
+    assert get_checkin_expect(hook_cfg, "u1") is None
 
 
 def test_filled_slot_explicit_append(hook_cfg: dict) -> None:
@@ -104,13 +150,32 @@ def test_filled_slot_explicit_append(hook_cfg: dict) -> None:
     set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
 
     async def run() -> None:
-        await h._maybe_consume_checkin_expect("追加到时间轴 补一句", "u1", "tok")
+        await h._maybe_consume_checkin_expect("追加 补一句", "u1", "tok")
 
     asyncio.run(run())
 
     body = get_slot_body(hook_cfg, "10:00", tdt)
     assert "身体·睡眠7h" in body
     assert "补一句" in body
+
+
+def test_filled_slot_legacy_append_phrase(hook_cfg: dict) -> None:
+    """旧版「追加到时间轴 …」仍视为显式追加。"""
+    set_state(hook_cfg, "active")
+    tdt = datetime(2026, 5, 4, 11, 0, 0)
+    ts.ensure_timeline_file(hook_cfg, tdt)
+    ts.upsert_timeline_slot(hook_cfg, "11:00", "番茄中", dt=tdt)
+    h = _H(hook_cfg, acp=_ACP(out="续写"))
+    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "11:00")
+
+    async def run() -> None:
+        await h._maybe_consume_checkin_expect("追加到时间轴 续写", "u1", "tok")
+
+    asyncio.run(run())
+
+    body = get_slot_body(hook_cfg, "11:00", tdt)
+    assert "番茄中" in body
+    assert "续写" in body
 
 
 def test_checkin_long_reply_compacted(hook_cfg: dict) -> None:

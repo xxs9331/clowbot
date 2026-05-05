@@ -79,8 +79,8 @@ class TimelineAppendMixin:
             )
             return True
 
-        out = (reply or "").strip() or f"已追加到时间轴 {slot}～"
-        await self.wx.send_text(out, from_user, context_token)
+        head = (reply or "").strip() or f"已追加到时间轴 {slot}～"
+        await self.wx.send_text(f"{head}\n{line}", from_user, context_token)
         return True
 
 
