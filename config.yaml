@@ -37,6 +37,8 @@ timeline:
   project_overview_path: "1-Projects/项目进度总览.md"
   checkin_ai_timeout_sec: 12
   checkin_poll_interval_sec: 0
+  write_policy: "whitelist_only"
+  checkin_write_if_filled: false
 
 # ─── 生生项目分类 ───
 categories:

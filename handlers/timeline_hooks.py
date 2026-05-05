@@ -10,6 +10,7 @@ from datetime import datetime
 from utils.flow_log import log_flow_event
 from utils.timeline_state import get_checkin_expect, get_state, pop_checkin_expect, set_state
 from utils.timeline_sync import (
+    get_slot_body,
     timeline_enabled,
     upsert_timeline_slot,
     slot_at,
@@ -63,6 +64,24 @@ class TimelineHooksMixin:
             return False
 
         pop_checkin_expect(self.cfg, from_user)
+        tl = self.cfg.get("timeline") or {}
+        allow_append_when_filled = bool(tl.get("checkin_write_if_filled", False))
+        existing = get_slot_body(self.cfg, slot, dt=tdt)
+        if existing and not allow_append_when_filled:
+            log_flow_event(
+                stage="timeline",
+                route="checkin_skip_filled_no_append",
+                user_text=body,
+                from_user=from_user,
+                extra={"slot": slot, "existing": existing[:120]},
+            )
+            await self.wx.send_text(
+                f"该格 {slot} 已有记录；如需追加请明确说“追加到时间轴”。",
+                from_user,
+                context_token,
+            )
+            return True
+
         upsert_timeline_slot(self.cfg, slot, body, dt=tdt)
         await self.wx.send_text(
             f"已记到时间轴 {slot}～",

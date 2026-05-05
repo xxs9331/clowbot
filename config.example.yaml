@@ -57,6 +57,10 @@ timeline:
   checkin_ai_timeout_sec: 12
   # 0 或未写：对齐整点/半点；>0 时每 N 秒轮询一次（调试用，如 300=5 分钟；最小 10）
   checkin_poll_interval_sec: 0
+  # 时间轴写入策略：仅允许白名单来源（record_add / sleep_keyword / checkin_reply）
+  write_policy: "whitelist_only"
+  # checkin 回复命中已填格时是否仍允许自动追加（默认 false：仅补空格）
+  checkin_write_if_filled: false
 
 # ─── 生生项目分类 ───
 categories:

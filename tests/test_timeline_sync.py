@@ -85,3 +85,11 @@ def test_slot_at_semantics():
     # 跨天边界
     assert ts.slot_at(datetime(2026, 5, 4, 0, 5, 0)) == "00:00"
     assert ts.slot_at(datetime(2026, 5, 4, 23, 45, 0)) == "23:30"
+
+
+def test_dedup_category_prefix_and_plain_text(cfg):
+    dt = datetime(2026, 5, 4, 8, 0)
+    ts.ensure_timeline_file(cfg, dt)
+    assert ts.upsert_timeline_slot(cfg, "08:00", "睡眠7h21m", dt=dt)
+    assert ts.upsert_timeline_slot(cfg, "08:00", "身体·睡眠7h21m", dt=dt)
+    assert ts.get_slot_body(cfg, "08:00", dt) == "睡眠7h21m"

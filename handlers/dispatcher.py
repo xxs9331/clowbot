@@ -647,6 +647,14 @@ class DispatcherMixin:
                 )
 
         if tool == TOOL_DECISION_NONE:
+            log_flow_event(
+                stage="timeline",
+                route="write_blocked",
+                user_text=user_text,
+                from_user=from_user,
+                session_id=self.unified_session_id,
+                extra={"reason": "tool_none", "reply_present": bool(reply)},
+            )
             if reply:
                 await self.wx.send_text(reply, from_user, context_token)
                 return True

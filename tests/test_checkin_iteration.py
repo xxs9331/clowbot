@@ -89,6 +89,7 @@ def test_filled_slot_no_expect(checkin_cfg: dict) -> None:
     assert get_checkin_expect(checkin_cfg, "wx-user-1") is None
     assert get_last_ping(checkin_cfg) == ("2026-05-04", "10:00")
     assert len(h.wx.messages) == 1
+    assert "追加到时间轴" in h.wx.messages[0][0]
 
 
 def test_same_slot_skipped_second_time(checkin_cfg: dict) -> None:

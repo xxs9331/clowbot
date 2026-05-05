@@ -85,6 +85,14 @@ def _parse_slot_lines(text: str) -> dict[str, str]:
     return out
 
 
+def _normalize_for_dedup(s: str) -> str:
+    """用于时间轴追加去重的轻量规范化：去掉可选分类前缀 ``X·`` 并 strip。"""
+    t = (s or "").strip()
+    if "·" in t:
+        t = t.split("·", 1)[-1]
+    return t.strip()
+
+
 def build_blank_timeline_body(day: date | None = None) -> str:
     day = day or datetime.now().date()
     ds = day.strftime("%Y-%m-%d")
@@ -208,8 +216,10 @@ def upsert_timeline_slot(
             elif not old_body:
                 new_body = c
             else:
-                if c in old_body or any(
-                    part.strip() == c for part in old_body.split(sep)
+                norm_c = _normalize_for_dedup(c)
+                norm_old = _normalize_for_dedup(old_body)
+                if norm_c in norm_old or any(
+                    _normalize_for_dedup(part) == norm_c for part in old_body.split(sep)
                 ):
                     new_body = old_body
                     log_flow_event(

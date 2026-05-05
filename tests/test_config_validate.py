@@ -44,3 +44,19 @@ def test_collect_errors_checkin_poll_interval_invalid():
         "timeline": {**minimal_timeline("/x"), "checkin_poll_interval_sec": 5},
     }
     assert any("checkin_poll_interval" in e for e in collect_config_errors(cfg_bad))
+
+
+def test_collect_errors_timeline_write_policy_invalid():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "write_policy": "allow_all"},
+    }
+    assert any("write_policy" in e for e in collect_config_errors(cfg))
+
+
+def test_collect_errors_checkin_write_if_filled_type():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_write_if_filled": "false"},
+    }
+    assert any("checkin_write_if_filled" in e for e in collect_config_errors(cfg))

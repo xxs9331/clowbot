@@ -79,6 +79,12 @@ def collect_config_errors(cfg: dict) -> list[str]:
                     errors.append("timeline.checkin_poll_interval_sec must be >= 0")
                 elif 0 < pv < 10:
                     errors.append("timeline.checkin_poll_interval_sec if >0 must be >= 10")
+        write_policy = str(tl.get("write_policy") or "whitelist_only").strip()
+        if write_policy and write_policy != "whitelist_only":
+            errors.append("timeline.write_policy must be whitelist_only")
+        cwi = tl.get("checkin_write_if_filled", False)
+        if not isinstance(cwi, bool):
+            errors.append("timeline.checkin_write_if_filled must be true or false")
 
     return errors
 

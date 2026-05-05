@@ -117,6 +117,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         f"场景：用户在 {slot} 这个时间点已有记录（{slot_preview}），"
         "请简要概括并附 1 条推进建议（可点名下一步拖延项，但不要人身攻击）。\n"
         "语气要像是在轻轻确认，不是在催填空 — 该格已有内容，不需要用户回复即可。\n"
+        "若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加需明确说“追加到时间轴”。\n"
         "不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。\n\n"
         f"当前时间：{ctx['time']}\n"
         f"检查的时间节点：{ctx['slot_checked']}\n"
@@ -138,7 +139,10 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
             extra={"reason": "no_session"},
         )
         short = slot_body[:120] + ("…" if len(slot_body) > 120 else "")
-        return f"{slot} 已记录：{short}，继续加油～有需要随时说。"
+        return (
+            f"{slot} 已记录：{short}，继续加油～有需要随时说。"
+            "如需追加到时间轴，请明确说“追加到时间轴”。"
+        )
 
     try:
         timeout = float((cfg.get("timeline") or {}).get("checkin_ai_timeout_sec") or 12.0)
@@ -171,7 +175,10 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
             extra={"error": str(e)[:200]},
         )
         short = slot_body[:120] + ("…" if len(slot_body) > 120 else "")
-        return f"{slot} 已记录：{short}，继续加油～有需要随时说。"
+        return (
+            f"{slot} 已记录：{short}，继续加油～有需要随时说。"
+            "如需追加到时间轴，请明确说“追加到时间轴”。"
+        )
 
 
 async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:

@@ -61,3 +61,21 @@ def test_reply_goes_to_expect_slot_not_current_time(hook_cfg: dict) -> None:
 
     assert get_slot_body(hook_cfg, "10:00", tdt) == "整理论文"
     assert h.wx.messages and "10:00" in h.wx.messages[0][0]
+
+
+def test_reply_blocked_when_slot_filled(hook_cfg: dict) -> None:
+    set_state(hook_cfg, "active")
+    tdt = datetime(2026, 5, 4, 10, 0, 0)
+    ts.ensure_timeline_file(hook_cfg, tdt)
+    ts.upsert_timeline_slot(hook_cfg, "10:00", "身体·睡眠7h", dt=tdt)
+    h = _H(hook_cfg)
+    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
+
+    async def run() -> None:
+        consumed = await h._maybe_consume_checkin_expect("补一句状态", "u1", "tok")
+        assert consumed is True
+
+    asyncio.run(run())
+
+    assert get_slot_body(hook_cfg, "10:00", tdt) == "身体·睡眠7h"
+    assert h.wx.messages and "已有记录" in h.wx.messages[0][0]
