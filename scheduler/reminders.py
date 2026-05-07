@@ -54,7 +54,10 @@ async def remind_check_loop(handler):
                 print(f"[Bot] 提醒索引已加载: {len(reminder_heap)} 条，日期={today.isoformat()}")
 
             if not reminder_heap:
-                await handler._reminder_refresh.wait()
+                try:
+                    await asyncio.wait_for(handler._reminder_refresh.wait(), timeout=120)
+                except asyncio.TimeoutError:
+                    pass
                 continue
 
             next_due_dt = reminder_heap[0][0]
@@ -88,6 +91,32 @@ async def remind_check_loop(handler):
 
                 ok = mark_reminder_done_by_time_text(log_path, r["time"], r["text"])
                 if ok:
+                    # 自动转待办：提醒到点并成功标记后，补一条到「## 📋 待办」。
+                    remind_text = r["text"]
+                    try:
+                        from utils.log_sync import append_to_markdown_section, get_log_path
+                        from utils.section_reader import extract_section_text
+
+                        todo_log_path = get_log_path(
+                            handler.cfg["vault"]["root"],
+                            handler.cfg["vault"]["daily_log_dir"],
+                        )
+                        todo_body = extract_section_text(
+                            todo_log_path.read_text(encoding="utf-8")
+                            if todo_log_path.exists()
+                            else "",
+                            "📋",
+                            "待办",
+                            include_heading=False,
+                        )
+                        if remind_text not in (todo_body or ""):
+                            append_to_markdown_section(
+                                todo_log_path, "## 📋 待办", f"- [ ] {remind_text}"
+                            )
+                    except Exception:
+                        # 写盘失败不影响提醒推送主流程
+                        pass
+
                     # 去重键使用时间+文本，避免行号变化导致同提醒重复触发
                     handler._reminded_ids.add(rid)
                     print(f"[Bot] ⏰ 提醒已标记完成: {r['text']}")

@@ -12,6 +12,7 @@ from config import _log_reasoning
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
 from utils.flow_log import log_flow_event
+from utils.log_sync import append_to_markdown_section, get_log_path
 from utils.time_utils import time_str
 from utils.timeline_compact import compact_timeline_line
 from utils.tool_names import DOMAIN_RECORD, TOOL_RECORD_ADD
@@ -51,6 +52,55 @@ class RecordCoachMixin:
         event_date = str(payload.get("event_date") or "").strip()
         clock_hm = _effective_hhmm(payload)
         v = self.cfg["vault"]
+
+        # === Python 直写（优先） ===
+        log_path = get_log_path(v["root"], v["daily_log_dir"])
+        line = f"- [x] {clock_hm} {text} （{category}）"
+        try:
+            append_to_markdown_section(log_path, "## 📝 记录", line)
+            await self.wx.send_text(
+                reply or f"已记录 {category}：{text}", from_user, context_token
+            )
+            try:
+                from utils.timeline_sync import (
+                    slot_for_hhmm,
+                    timeline_enabled,
+                    upsert_timeline_slot,
+                )
+
+                if timeline_enabled(self.cfg):
+                    if event_date:
+                        try:
+                            tdt = datetime.strptime(event_date, "%Y-%m-%d")
+                        except ValueError:
+                            tdt = datetime.now()
+                    else:
+                        tdt = datetime.now()
+                    slot = slot_for_hhmm(clock_hm, tdt)
+                    tl_raw = str(payload.get("timeline_line") or "").strip()
+                    line_src = tl_raw if tl_raw else (f"{category}·{text}" if category else text)
+                    line = await compact_timeline_line(
+                        self.acp,
+                        self.cfg,
+                        self.unified_session_id,
+                        line_src,
+                        trace_tag="record_timeline_compact",
+                    )
+                    if line:
+                        upsert_timeline_slot(self.cfg, slot, line, dt=tdt)
+            except Exception as e:
+                log_flow_event(
+                    stage="timeline",
+                    route="write_fail",
+                    user_text=(text or "")[:120],
+                    from_user=from_user,
+                    extra={"source": "record_coach_dual_write", "error": str(e)[:200]},
+                )
+            return True
+        except Exception:
+            pass
+
+        # === 原有 LLM 路径（保留） ===
         prompt = build_coach_write_prompt(
             DOMAIN_RECORD,
             vault_root=v["root"],

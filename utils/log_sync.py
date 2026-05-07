@@ -35,6 +35,33 @@ def get_log_path(vault_root: str, daily_log_dir: str, dt: datetime = None) -> Pa
     return Path(vault_root) / daily_log_dir / str(dt.year) / f"{dt.month:02d}" / dt.strftime("%Y-%m-%d.md")
 
 
+def append_to_markdown_section(filepath: Path, heading: str, line: str) -> None:
+    """在 Markdown 文件的指定标题节下追加一行。标题不存在则创建。"""
+    if not filepath.exists():
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(f"{heading}\n{line}\n", encoding="utf-8")
+        return
+
+    content = filepath.read_text(encoding="utf-8")
+    lines_list = content.splitlines()
+    heading_index = None
+    for i, item in enumerate(lines_list):
+        if item.strip() == heading:
+            heading_index = i
+            break
+
+    if heading_index is None:
+        content = content.rstrip("\n") + f"\n\n{heading}\n{line}\n"
+    else:
+        insert_at = heading_index + 1
+        while insert_at < len(lines_list) and not lines_list[insert_at].startswith("## "):
+            insert_at += 1
+        lines_list.insert(insert_at, line)
+        content = "\n".join(lines_list) + "\n"
+
+    filepath.write_text(content, encoding="utf-8")
+
+
 def parse_reminder_lines(text_lines: list[str]) -> list[dict]:
     """对一组 markdown 行（已 split 过的）按提醒节解析。
 
@@ -121,6 +148,62 @@ def mark_reminder_done_by_time_text(
             lines[i] = line.replace("- [ ]", "- [x]", 1) + f" ✅{now_str}"
             log_path.write_text("\n".join(lines), encoding="utf-8")
             return True
+    return False
+
+
+def mark_todo_group_done(filepath: Path, group_anchor_text: str, now_hm: str) -> bool:
+    """在 ## 📋 待办 节内，将包含 anchor 的 - [ ] 行改为 - [x] ... ✅HH:MM。"""
+    if not filepath.exists():
+        return False
+    content = filepath.read_text(encoding="utf-8")
+    # 延迟导入避免与 section_reader 的模块级互导循环。
+    from utils.section_reader import extract_section_text
+
+    todo_body = extract_section_text(content, "📋", "待办", include_heading=False)
+    if not todo_body:
+        return False
+    for line in todo_body.splitlines():
+        s = line.strip()
+        if s.startswith("- [ ]") and group_anchor_text in s:
+            body = s[5:].strip()
+            new_line = f"- [x] {body} ✅{now_hm}"
+            filepath.write_text(content.replace(line, new_line, 1), encoding="utf-8")
+            return True
+    return False
+
+
+def remove_todo_item_from_group(filepath: Path, item_text: str) -> bool:
+    """从待办行中精确移除子项；空组则删行。"""
+    if not filepath.exists():
+        return False
+    content = filepath.read_text(encoding="utf-8")
+    # 延迟导入避免与 section_reader 的模块级互导循环。
+    from utils.section_reader import _TODO_TIMESTAMP_RE, _split_todo_subitems, extract_section_text
+
+    todo_body = extract_section_text(content, "📋", "待办", include_heading=False)
+    if not todo_body:
+        return False
+    for line in todo_body.splitlines():
+        s = line.strip()
+        if not (s.startswith("- [ ]") or s.startswith("- [x]")):
+            continue
+        body = s[5:].strip()
+        items = _split_todo_subitems(body)
+        if item_text not in items:
+            continue
+        items = [x for x in items if x != item_text]
+        ts_match = _TODO_TIMESTAMP_RE.search(body)
+        ts_suffix = f" ✅{ts_match.group(1)}" if ts_match else ""
+        if not items:
+            content = content.replace(line + "\n", "", 1)
+            if line in content:
+                content = content.replace(line, "", 1)
+        else:
+            prefix = "- [x]" if s.startswith("- [x]") else "- [ ]"
+            new_line = f"{prefix} {'，'.join(items)}{ts_suffix}"
+            content = content.replace(line, new_line, 1)
+        filepath.write_text(content, encoding="utf-8")
+        return True
     return False
 
 

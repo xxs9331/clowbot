@@ -90,6 +90,21 @@ class LocalViewMixin:
         return 3
 
     @staticmethod
+    def _extract_search_keywords(text: str) -> list[str]:
+        """从查询文本中提取搜索关键词，去掉包装词和标点"""
+        raw = (text or "").strip()
+        for kw in [
+            "查一下", "查一查", "查查", "查找", "搜索", "搜一下",
+            "找一下", "找一找", "找找", "回忆一下", "回想一下",
+            "相关的记忆", "相关的记录", "的记忆", "的记录",
+            "相关", "一下", "最近", "看看", "看下", "说说",
+            "讲讲", "有没有", "哪些", "几条",
+        ]:
+            raw = raw.replace(kw, " ")
+        words = re.split(r"[\s,，。！？、]+", raw)
+        return [w for w in words if len(w) >= 2]
+
+    @staticmethod
     def _wants_record_recent_snippet(raw: str) -> bool:
         """是否查询「最近若干条记录/记忆」（读今日日记 📝 记录节，非写入）。"""
         if not raw.strip():
@@ -130,6 +145,7 @@ class LocalViewMixin:
             return self._build_local_daily_brief(content)
         if kind == "record_recent":
             n = self._parse_recent_bullet_count(user_text)
+            keywords = self._extract_search_keywords(user_text)
             body = extract_section_text(content, "📝", "记录", include_heading=False)
             bullets: list[str] = []
             for line in (body or "").splitlines():
@@ -138,6 +154,14 @@ class LocalViewMixin:
                     bullets.append(s)
             if not bullets:
                 return "今日「📝 记录」里还没有条目。"
+            # 有关键词 → 过滤；无关键词 → 返回最近 N 条
+            if keywords:
+                matched = [b for b in bullets if any(kw in b for kw in keywords)]
+                if matched:
+                    head = f"找到 {len(matched)} 条相关记录："
+                    return head + "\n" + "\n".join(matched[-n:])
+                else:
+                    return f"今日记录中没有找到「{' '.join(keywords)}」相关的内容。"
             tail = bullets[-n:]
             head = f"今日记录（最近 {len(tail)} 条）："
             return head + "\n" + "\n".join(tail)

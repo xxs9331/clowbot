@@ -333,18 +333,10 @@ class DispatcherMixin:
         """把 Handler 提供的结构化记忆拼进 unified 上下文。
 
         分层注入：
-          - 顶部：shared_history（最近 5 轮对话流，让 reply 自带上下文感知）
-          - 上中：structured_state_block（现在在做什么）
+          - 顶部：structured_state_block（现在在做什么）
           - 中部：recent_decisions_json（刚才做了什么，现有）
           - 底部：context_block（本轮上下文）
         """
-        shared_hist = ""
-        gs_hist = getattr(self, "_build_shared_history", None)
-        if callable(gs_hist):
-            try:
-                shared_hist = (gs_hist(user_id) or "").strip()
-            except Exception:
-                shared_hist = ""
         state_block = ""
         gs = getattr(self, "_structured_state_context_block", None)
         if callable(gs):
@@ -360,8 +352,6 @@ class DispatcherMixin:
             except Exception:
                 extra_ctx = ""
         parts = []
-        if shared_hist:
-            parts.append(shared_hist)
         if state_block:
             parts.append(state_block)
         if extra_ctx:
@@ -389,6 +379,10 @@ class DispatcherMixin:
             f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", '
             f'"event_hhmm": "HH:MM?", "timeline_line": "可选"}}\n'
             f'  （event_hhmm：已发生事件在用户句中的钟点，如「15:00 吃了弥宁」→ "15:00"；无则省略）\n'
+            '- **重要：reply 与 payload.text 语气分离**\n'
+            '  - reply：微信聊天语气，可有温度/语气词/emoji，承接上文对话\n'
+            '  - payload.text：日志书面语，去情绪词、去口语、客观陈述，如 "体重 72.3kg"\n'
+            '  - 示例：用户说 "今天喝了奶茶撑死了" → reply: "记下了！偶尔一杯没事~" → payload.text: "下午 奶茶"\n'
             f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
             f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}\n\n'
             "分流规则：\n"
@@ -638,54 +632,7 @@ class DispatcherMixin:
             session_id=self.unified_session_id,
             extra={"intent_hint": intent_hint},
         )
-        # 回退旧路径：要求模型一次返回 {tool,payload,reply}
-        current_task = self._get_current_queue_task(user_id)
-        remaining = self._get_remaining_queue_tasks(user_id)
-        pending_reorder = self._pending_reorders.get(user_id, [])
-        context_block = self._build_unified_context_block(
-            current_task=current_task,
-            remaining=remaining,
-            pending_reorder=pending_reorder,
-            text=text,
-        )
-        context_block = self._augment_context_block_with_memory(user_id, context_block)
-        hint_block = ""
-        if isinstance(intent_hint, dict) and intent_hint:
-            try:
-                hint_block = (
-                    "参考意图（来自小模型预分类，仅作参考，可推翻）：\n"
-                    f"{json.dumps(intent_hint, ensure_ascii=False)}\n\n"
-                )
-            except Exception:
-                hint_block = ""
-        legacy_prompt = self._build_unified_legacy_prompt(hint_block, context_block)
-        raw_reply, _ = await self.acp.prompt(
-            self.unified_session_id, legacy_prompt, trace_tag="unified_decide_fallback"
-        )
-        legacy_decision = self._extract_json_object(raw_reply)
-        raw_stripped = (raw_reply or "").strip()
-        used_raw_body_fallback = False
-        if not (isinstance(legacy_decision, dict) and legacy_decision):
-            if raw_stripped and "{" in raw_stripped:
-                legacy_decision = {
-                    "tool": TOOL_DECISION_NONE,
-                    "payload": {},
-                    "reply": raw_stripped[:UNIFIED_LEGACY_RAW_FALLBACK_MAX_CHARS],
-                }
-                used_raw_body_fallback = True
-            else:
-                legacy_decision = {"tool": TOOL_DECISION_NONE, "payload": {}, "reply": ""}
-        log_flow_event(
-            stage="route",
-            route="unified_text_fallback_used",
-            user_text=text,
-            session_id=self.unified_session_id,
-            extra={
-                "decision": legacy_decision,
-                "raw_body_fallback": used_raw_body_fallback,
-            },
-        )
-        return legacy_decision
+        return {"tool": TOOL_DECISION_NONE, "payload": {}, "reply": ""}
 
     async def _apply_unified_decision(
         self,

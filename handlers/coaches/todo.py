@@ -13,7 +13,7 @@ from pathlib import Path
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
 from utils.flow_log import log_flow_event
-from utils.log_sync import get_log_path
+from utils.log_sync import get_log_path, mark_todo_group_done, remove_todo_item_from_group
 from utils.section_reader import read_todo_section
 from utils.time_utils import time_str
 from utils.tool_names import (
@@ -100,11 +100,23 @@ class TodoCoachMixin:
         except Exception:
             md = ""
         flat: list[str] = []
+        groups: list[dict] = []
         if md:
             try:
-                flat = read_todo_section(md).get("queue_flat", []) or []
+                parsed = read_todo_section(md)
+                flat = parsed.get("queue_flat", []) or []
+                groups = parsed.get("groups", []) or []
             except Exception:
                 flat = []
+                groups = []
+        # 缓存 item -> group 映射，供 done_current 判断组边界。
+        self._todo_item_group = {}
+        self._todo_groups = groups
+        for g_idx, g in enumerate(groups):
+            for item in (g.get("items") or []):
+                label = str(item).strip()
+                if label:
+                    self._todo_item_group[label] = g_idx
         tasks = [str(x).strip() for x in flat if str(x).strip()]
         if tasks:
             self._set_todo_queue(user_id, tasks)
@@ -407,32 +419,37 @@ class TodoCoachMixin:
         idx = state.get("idx", 0)
         completed_count = min(idx + 1, total_count) if total_count > 0 else 0
         self._pending_reorders.pop(from_user, None)
-        await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
-        out = ""
-        try:
-            now_hm = time_str()
-            prompt = self._write_todo_prompt(
-                {
-                    "op": "mark_progress",
-                    "just_completed_item": current_task,
-                    "completed_at_hhmm": now_hm,
-                }
-            )
-            out, _ = await self.acp.prompt(
-                self.todo_session_id, prompt, trace_tag="vault_mark_done"
-            )
-        finally:
-            await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
+        now_hm = time_str()
+        groups = list(getattr(self, "_todo_groups", []) or [])
+        group_idx = getattr(self, "_todo_item_group", {}).get(current_task)
+        is_last_in_group = False
+        if group_idx is not None and 0 <= group_idx < len(groups):
+            g_items = groups[group_idx].get("items") or []
+            if g_items:
+                is_last_in_group = g_items[-1] == current_task
+        if is_last_in_group:
+            v = self.cfg["vault"]
+            log_path = get_log_path(v["root"], v["daily_log_dir"])
+            try:
+                mark_todo_group_done(log_path, current_task, now_hm)
+            except Exception:
+                pass
         self._advance_queue_task(from_user)
         progress_text = f"({completed_count}/{total_count})" if total_count > 0 else ""
-        done_reply = (reply or out or "").strip()
-        if not done_reply:
-            done_reply = (
-                f"✅ {current_task}完成 {progress_text}。"
-                if progress_text
-                else f"✅ {current_task}完成。"
+        nudge_text = (
+            f"✅ 本组完成 {progress_text}。"
+            if is_last_in_group
+            else (f"✅ {current_task}完成 {progress_text}。" if progress_text else f"✅ {current_task}完成。")
+        )
+        next_task = self._get_current_queue_task(from_user)
+        if next_task:
+            prompt = f"{nudge_text} 下一个是「{next_task}」。请用一句自然的话鼓励用户继续。"
+            nudged, _ = await self.acp.prompt(
+                self.unified_session_id, prompt, trace_tag="todo_nudge"
             )
-        await self._todo_emit_reply(done_reply, from_user, context_token)
+            await self._todo_emit_reply((nudged or reply or nudge_text).strip(), from_user, context_token)
+            return True
+        await self._todo_emit_reply(f"{nudge_text} 全部清空 🎉", from_user, context_token)
         return True
 
     async def _coach_not_done(
@@ -529,22 +546,32 @@ class TodoCoachMixin:
         abandoned_task = tasks.pop(idx)
         if tasks:
             state["idx"] = min(idx, len(tasks) - 1)
-        await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
+        v = self.cfg["vault"]
+        log_path = get_log_path(v["root"], v["daily_log_dir"])
         try:
-            await self._vault_tool_remove_subitem(abandoned_task)
-        finally:
-            await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
+            remove_todo_item_from_group(log_path, abandoned_task)
+        except Exception:
+            pass
         if not tasks:
             self._todo_queues.pop(from_user, None)
-            await self._todo_emit_reply(
-                reply or f"已放弃：{abandoned_task}。当前没有进行中的待办。", from_user, context_token
+            final_text = f"已放弃：{abandoned_task}。当前没有进行中的待办。"
+            nudged, _ = await self.acp.prompt(
+                self.unified_session_id,
+                f"{final_text} 请用一句自然中文回复用户。",
+                trace_tag="todo_nudge",
             )
+            await self._todo_emit_reply((reply or nudged or final_text).strip(), from_user, context_token)
             return True
         next_task = self._get_current_queue_task(from_user)
-        abandon_reply = reply or f"已放弃：{abandoned_task}。"
+        abandon_reply = f"已放弃：{abandoned_task}。"
         if next_task:
-            abandon_reply = f"{abandon_reply}\n现在先做：{next_task}，做完了吗？"
-        await self._todo_emit_reply(abandon_reply, from_user, context_token)
+            abandon_reply = f"{abandon_reply} 下一个是「{next_task}」。请继续。"
+        nudged, _ = await self.acp.prompt(
+            self.unified_session_id,
+            f"{abandon_reply} 请用一句自然中文回复用户。",
+            trace_tag="todo_nudge",
+        )
+        await self._todo_emit_reply((reply or nudged or abandon_reply).strip(), from_user, context_token)
         return True
 
 

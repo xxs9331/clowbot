@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from handlers.dispatcher import register_tool_handler
 from utils.coach_tools import OUTPUT_WRITE_CONFIRM, build_coach_write_prompt
+from utils.log_sync import append_to_markdown_section, get_log_path
 from utils.tool_names import DOMAIN_REMIND, TOOL_REMIND_ADD
 
 
@@ -29,6 +30,20 @@ class RemindCoachMixin:
             return True
         event_date = str(payload.get("event_date") or "").strip()
         v = self.cfg["vault"]
+
+        # === Python 直写（优先） ===
+        log_path = get_log_path(v["root"], v["daily_log_dir"])
+        line = f"- [ ] {hhmm}：{text}"
+        try:
+            append_to_markdown_section(log_path, "## ⏰ 提醒", line)
+            await self.wx.send_text(
+                reply or f"⏰ 已设提醒：{hhmm} {text}", from_user, context_token
+            )
+            return True
+        except Exception:
+            pass
+
+        # === 原有 LLM 路径（保留） ===
         prompt = build_coach_write_prompt(
             DOMAIN_REMIND,
             vault_root=v["root"],

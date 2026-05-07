@@ -1599,10 +1599,37 @@ def build_todo_coach_skill_binding(vault_root: str) -> str:
 - 待办行的分组（每行最多五项、中文逗号）、整组完成后才改 `- [x]`、进度 (N/M) 文案等，均以该文件为准；与本提示其它段落冲突时 **以 todo-coach 为准**。"""
 
 
+def task_decompose_skill_path(vault_root: str) -> str:
+    return _coach_skill_path(vault_root, "task-decompose")
+
+
+def build_task_decompose_skill_binding(vault_root: str) -> str:
+    p = task_decompose_skill_path(vault_root)
+    return f"""## 任务分解技能 task-decompose
+当用户说「分解 xxx」「拆分 xxx」「拆解 xxx」时，进入多轮协商模式把任务拆成可执行步骤，协商完成后按用户选择存模板或导入待办。
+- 技能文件路径：`{p}`
+- 规则以 task-decompose SKILL 为准，不要凭默认习惯臆造。"""
+
+
+def daily_summary_skill_path(vault_root: str) -> str:
+    return _coach_skill_path(vault_root, "daily-summary")
+
+
+def build_daily_summary_skill_binding(vault_root: str) -> str:
+    p = daily_summary_skill_path(vault_root)
+    return f"""## 日报总结技能 daily-summary
+当用户说「总结」「日报」「今天干什么了」「今天怎么样」时，读取今日生活日志生成三项汇总（记录/待办/提醒），只读不写。
+- 技能文件路径：`{p}`
+- 规则以 daily-summary SKILL 为准。"""
+
+
 def build_system_prompt(
     vault_root: str, daily_log_dir: str, project_dir: str = "", task_dir: str = ""
 ) -> str:
-    skill_block = build_todo_coach_skill_binding(vault_root)
+    todo_block = build_todo_coach_skill_binding(vault_root)
+    decompose_block = build_task_decompose_skill_binding(vault_root)
+    summary_block = build_daily_summary_skill_binding(vault_root)
+    skill_block = f"{todo_block}\n\n{decompose_block}\n\n{summary_block}"
     return f"""你是"生生项目"的生活日志助手。只处理生活相关的事，不处理工作/学术任务。
 
 ## 核心规则

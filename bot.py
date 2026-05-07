@@ -72,6 +72,20 @@ async def main():
         print(f"[Bot] 已提醒缓存数: {len(h._reminded_ids)}")
 
         while True:
+            if not acp.is_running:
+                print("[Bot] ACP 已退出，尝试重启...")
+                try:
+                    await acp.stop()
+                except Exception:
+                    pass
+                try:
+                    await acp.start()
+                    await h.init_session()
+                    print("[Bot] ACP 重启成功")
+                except Exception as e:
+                    print(f"[Bot] ACP 重启失败: {e}，30秒后重试")
+                    await asyncio.sleep(30)
+                    continue
             try:
                 async for msg in wx.poll_messages():
                     asyncio.create_task(h.handle(msg))

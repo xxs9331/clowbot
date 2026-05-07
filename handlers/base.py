@@ -1,6 +1,7 @@
 """消息主入口与 Handler 组合"""
 
 import asyncio
+from datetime import datetime
 import json
 import re
 import time
@@ -16,7 +17,7 @@ from utils.intent import (
 )
 from utils.flow_log import log_flow_event, snapshot_todo_queue
 from utils.timeline_state import mark_daily_opening_chat
-from utils.timeline_sync import timeline_enabled
+from utils.timeline_sync import timeline_enabled, timeline_path
 from utils.route_fast import build_fast_unified_decision
 from utils.tool_names import TOOL_TODO_DONE_CURRENT
 from wechat.client import ClawBotClient
@@ -629,6 +630,36 @@ class Handler(
         except Exception:
             pass
 
+    def _conversation_window_dir(self) -> Path:
+        root = Path(self.cfg["vault"]["root"]).resolve()
+        p = root / ".clawbot_tmp" / "conversation_window"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _persist_conversation_window(self, user_id: str) -> None:
+        bucket = self._conversation_window.get(user_id)
+        if not bucket:
+            return
+        fp = self._conversation_window_dir() / f"{user_id[-8:] or 'anon'}.json"
+        try:
+            fp.write_text(
+                json.dumps(bucket[-10:], ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _restore_conversation_window(self, user_id: str) -> None:
+        fp = self._conversation_window_dir() / f"{user_id[-8:] or 'anon'}.json"
+        if not fp.exists():
+            return
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                self._conversation_window[user_id] = data[-10:]
+        except Exception:
+            pass
+
     def _append_conversation_user(self, user_id: str, text: str) -> None:
         """用户消息进入共享对话窗口（按 from_user 分桶）。"""
         t = (text or "").strip()
@@ -638,6 +669,7 @@ class Handler(
         bucket.append({"role": "user", "text": t[:300], "ts": time.time()})
         while len(bucket) > self._conversation_window_max:
             bucket.pop(0)
+        self._persist_conversation_window(user_id)
 
     def _append_conversation_assistant(self, user_id: str, text: str) -> None:
         """助手 reply 进入共享对话窗口（仅 LLM unified 决策路径调用）。"""
@@ -648,6 +680,7 @@ class Handler(
         bucket.append({"role": "assistant", "text": t[:300], "ts": time.time()})
         while len(bucket) > self._conversation_window_max:
             bucket.pop(0)
+        self._persist_conversation_window(user_id)
 
     def _build_shared_history(self, user_id: str | None = None) -> str:
         """供 unified prompt 注入的对话历史块（最近 5 轮）。无 user_id 返回空串。"""
@@ -763,12 +796,11 @@ class Handler(
         # 域会话启动时一次性注入角色约束，后续写盘只传 JSON envelope。
         v = self.cfg["vault"]
         sys_prompt = build_system_prompt(v["root"], v["daily_log_dir"])
-        shared_hist = self._build_shared_history()  # init 阶段必空，仅作对称占位
         prime_tasks = [
             self.acp.prompt(
                 self.todo_session_id,
                 (
-                    f"{sys_prompt}\n\n{shared_hist}"
+                    f"{sys_prompt}\n\n"
                     "这是待办域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
                 ),
                 trace_tag="prime_todo",
@@ -776,7 +808,7 @@ class Handler(
             self.acp.prompt(
                 self.record_session_id,
                 (
-                    f"{sys_prompt}\n\n{shared_hist}"
+                    f"{sys_prompt}\n\n"
                     "这是记录域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
                 ),
                 trace_tag="prime_record",
@@ -784,7 +816,7 @@ class Handler(
             self.acp.prompt(
                 self.remind_session_id,
                 (
-                    f"{sys_prompt}\n\n{shared_hist}"
+                    f"{sys_prompt}\n\n"
                     "这是提醒域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
                 ),
                 trace_tag="prime_remind",
@@ -795,12 +827,24 @@ class Handler(
                 self.acp.prompt(
                     self.debug_session_id,
                     (
-                        f"{sys_prompt}\n\n{shared_hist}"
+                        f"{sys_prompt}\n\n"
                         "这是调试域上下文。使用更便宜的模型，用于 prompt 迭代与流程验证。"
                     ),
                     trace_tag="prime_debug",
                 )
             )
+        prime_tasks.append(
+            self.acp.prompt(
+                self.unified_session_id,
+                (
+                    f"{sys_prompt}\n\n"
+                    "这是统一决策域上下文。负责分析用户意图、选择工具、回复自然中文。"
+                    "待办格式与催办以 todo-coach 为准，任务分解以 task-decompose 为准，"
+                    "日报总结以 daily-summary 为准。"
+                ),
+                trace_tag="prime_unified",
+            )
+        )
         await asyncio.gather(*prime_tasks)
 
         # 兼容旧字段：默认代表 unified 会话
@@ -1012,6 +1056,8 @@ class Handler(
         """规则守卫 → 快通道 → 意图分类 → 统一决策 → 安全兜底。"""
         msg_trace = uuid.uuid4().hex[:12]
         # 进入路由即记录用户消息（覆盖 handle 与 eval 两条路径）
+        if from_user not in self._conversation_window:
+            self._restore_conversation_window(from_user)
         self._append_conversation_user(from_user, text)
         log_flow_event(
             stage="route",
@@ -1295,8 +1341,81 @@ class Handler(
         if await self._timeline_preprocess(text, from_user, context_token):
             return
 
-        # 个人使用不发斜杠命令；以 / 开头的统一忽略，避免被 LLM 当成自然语言乱解释。
+        # slash 命令：优先走本地命令路由，其余保持忽略，避免进入 LLM 误判。
         if text.startswith("/"):
+            slash_body = text[1:].strip()
+            if not slash_body:
+                log_flow_event(
+                    stage="route",
+                    route="ignore_slash",
+                    user_text=text,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                )
+                return
+            cmd, _, args_tail = slash_body.partition(" ")
+            cmd = cmd.strip()
+            args = args_tail.strip()
+
+            kind_map = {
+                "待办": "todo",
+                "代办": "todo",
+                "提醒": "remind",
+                "记录": "record",
+                "日志": "log",
+                "简报": "brief",
+            }
+            kind = kind_map.get(cmd)
+            if kind:
+                await self._local_view_with_optional_llm_fallback(
+                    kind, from_user, context_token, text
+                )
+                return
+
+            if cmd == "找":
+                query = args if args else "最近5条"
+                await self._local_view_with_optional_llm_fallback(
+                    "record_recent", from_user, context_token, query
+                )
+                return
+
+            if cmd == "时间轴":
+                tp = timeline_path(self.cfg, datetime.now())
+                if tp.exists():
+                    await self.wx.send_text(
+                        tp.read_text(encoding="utf-8")[:2000],
+                        from_user,
+                        context_token,
+                    )
+                else:
+                    await self.wx.send_text(
+                        "今日时间轴文件还不存在。",
+                        from_user,
+                        context_token,
+                    )
+                return
+
+            if cmd == "模板":
+                root = Path(self.cfg["vault"]["root"])
+                tp = root / "3-Resources" / "模板库" / "待办模板总表.md"
+                if tp.exists():
+                    await self.wx.send_text(
+                        tp.read_text(encoding="utf-8")[:2000],
+                        from_user,
+                        context_token,
+                    )
+                else:
+                    await self.wx.send_text(
+                        "模板总表文件还不存在。",
+                        from_user,
+                        context_token,
+                    )
+                return
+
+            if cmd == "睡觉":
+                await self._maybe_timeline_wake_sleep("睡觉了", from_user, context_token)
+                return
+
             log_flow_event(
                 stage="route",
                 route="ignore_slash",
