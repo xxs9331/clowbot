@@ -1,4 +1,4 @@
-"""时间轴 checkin 回复写回期望格。"""
+"""时间轴 hooks 前置行为。"""
 
 from __future__ import annotations
 
@@ -60,8 +60,7 @@ def hook_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     }
 
 
-def test_checkin_meta_bypass_keeps_expect_and_slot_empty(hook_cfg: dict) -> None:
-    """元指令不写轴、不清 expect，下一条仍可正常回填。"""
+def test_timeline_preprocess_no_sleep_text_not_consumed(hook_cfg: dict) -> None:
     set_state(hook_cfg, "active")
     tdt = datetime(2026, 5, 4, 10, 0, 0)
     ts.ensure_timeline_file(hook_cfg, tdt)
@@ -69,7 +68,7 @@ def test_checkin_meta_bypass_keeps_expect_and_slot_empty(hook_cfg: dict) -> None
     set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
 
     async def run() -> None:
-        consumed = await h._maybe_consume_checkin_expect("查看时间轴。", "u1", "tok")
+        consumed = await h._timeline_preprocess("在改 bot", "u1", "tok")
         assert consumed is False
 
     asyncio.run(run())
@@ -78,138 +77,49 @@ def test_checkin_meta_bypass_keeps_expect_and_slot_empty(hook_cfg: dict) -> None
     assert get_checkin_expect(hook_cfg, "u1") is not None
     assert h.wx.messages == []
 
-    h2 = _H(hook_cfg, acp=_ACP(out="写代码"))
-
-    async def run2() -> None:
-        await h2._maybe_consume_checkin_expect("在改 bot", "u1", "tok")
-
-    asyncio.run(run2())
-    assert get_slot_body(hook_cfg, "10:00", tdt) == "写代码"
-    assert get_checkin_expect(hook_cfg, "u1") is None
-
-
-def test_checkin_meta_bypass_custom_phrase_from_config(hook_cfg: dict) -> None:
-    hook_cfg["timeline"]["checkin_meta_bypass_phrases"] = ["仅看轴"]
-    set_state(hook_cfg, "active")
-    tdt = datetime(2026, 5, 4, 12, 0, 0)
-    ts.ensure_timeline_file(hook_cfg, tdt)
-    h = _H(hook_cfg)
-    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "12:00")
-
-    async def run() -> None:
-        assert await h._maybe_consume_checkin_expect("仅看轴", "u1", "tok") is False
-
-    asyncio.run(run())
-    assert get_slot_body(hook_cfg, "12:00", tdt) == ""
-    assert get_checkin_expect(hook_cfg, "u1") is not None
-
-
-def test_reply_goes_to_expect_slot_not_current_time(hook_cfg: dict) -> None:
+def test_timeline_preprocess_sleep_text_consumed(hook_cfg: dict) -> None:
     set_state(hook_cfg, "active")
     tdt = datetime(2026, 5, 4, 10, 0, 0)
     ts.ensure_timeline_file(hook_cfg, tdt)
-    h = _H(hook_cfg, acp=_ACP(out="整理论文"))
-    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
+    h = _H(hook_cfg, acp=_ACP(out="🌙 睡觉"))
 
     async def run() -> None:
-        await h._maybe_consume_checkin_expect("整理论文", "u1", "tok")
-
-    asyncio.run(run())
-
-    assert get_slot_body(hook_cfg, "10:00", tdt) == "整理论文"
-    assert h.wx.messages and "10:00" in h.wx.messages[0][0]
-    assert "整理论文" in h.wx.messages[0][0]
-
-
-def test_reply_blocked_when_slot_filled(hook_cfg: dict) -> None:
-    set_state(hook_cfg, "active")
-    tdt = datetime(2026, 5, 4, 10, 0, 0)
-    ts.ensure_timeline_file(hook_cfg, tdt)
-    ts.upsert_timeline_slot(hook_cfg, "10:00", "身体·睡眠7h", dt=tdt)
-    h = _H(hook_cfg)
-    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
-
-    async def run() -> None:
-        consumed = await h._maybe_consume_checkin_expect("补一句状态", "u1", "tok")
+        consumed = await h._timeline_preprocess("准备睡了", "u1", "tok")
         assert consumed is True
 
     asyncio.run(run())
 
-    assert get_slot_body(hook_cfg, "10:00", tdt) == "身体·睡眠7h"
-    assert h.wx.messages and "已有记录" in h.wx.messages[0][0]
-    # 拒绝写入后应清除 expect，避免后续每条消息都被当 checkin 消费
-    assert get_checkin_expect(hook_cfg, "u1") is None
+    assert h.wx.messages
+    assert "已休眠 checkin" in h.wx.messages[0][0]
 
 
-def test_filled_slot_explicit_append(hook_cfg: dict) -> None:
+def test_sleep_fallback_uses_default_line_when_compact_empty(hook_cfg: dict) -> None:
     set_state(hook_cfg, "active")
     tdt = datetime(2026, 5, 4, 10, 0, 0)
     ts.ensure_timeline_file(hook_cfg, tdt)
-    ts.upsert_timeline_slot(hook_cfg, "10:00", "身体·睡眠7h", dt=tdt)
-    h = _H(hook_cfg, acp=_ACP(out="补一句"))
+    h = _H(hook_cfg, acp=_ACP(out=""))
+
+    async def run() -> None:
+        consumed = await h._timeline_preprocess("晚安", "u1", "tok")
+        assert consumed is True
+
+    asyncio.run(run())
+
+    today = datetime.now()
+    slot = ts.slot_at(today)
+    body = get_slot_body(hook_cfg, slot, today)
+    assert body == "🌙 睡觉"
+
+
+def test_timeline_disabled_skip_preprocess(hook_cfg: dict) -> None:
+    hook_cfg["timeline"]["enabled"] = False
+    set_state(hook_cfg, "active")
+    h = _H(hook_cfg, acp=_ACP(out="🌙 睡觉"))
     set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
 
     async def run() -> None:
-        await h._maybe_consume_checkin_expect("追加 补一句", "u1", "tok")
+        consumed = await h._timeline_preprocess("晚安", "u1", "tok")
+        assert consumed is False
 
     asyncio.run(run())
-
-    body = get_slot_body(hook_cfg, "10:00", tdt)
-    assert "身体·睡眠7h" in body
-    assert "补一句" in body
-
-
-def test_filled_slot_legacy_append_phrase(hook_cfg: dict) -> None:
-    """旧版「追加到时间轴 …」仍视为显式追加。"""
-    set_state(hook_cfg, "active")
-    tdt = datetime(2026, 5, 4, 11, 0, 0)
-    ts.ensure_timeline_file(hook_cfg, tdt)
-    ts.upsert_timeline_slot(hook_cfg, "11:00", "番茄中", dt=tdt)
-    h = _H(hook_cfg, acp=_ACP(out="续写"))
-    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "11:00")
-
-    async def run() -> None:
-        await h._maybe_consume_checkin_expect("追加到时间轴 续写", "u1", "tok")
-
-    asyncio.run(run())
-
-    body = get_slot_body(hook_cfg, "11:00", tdt)
-    assert "番茄中" in body
-    assert "续写" in body
-
-
-def test_checkin_long_reply_compacted(hook_cfg: dict) -> None:
-    set_state(hook_cfg, "active")
-    tdt = datetime(2026, 5, 4, 10, 0, 0)
-    ts.ensure_timeline_file(hook_cfg, tdt)
-    long_in = "冗长" * 50
-    short_out = "压缩短句"
-    h = _H(hook_cfg, acp=_ACP(out=short_out))
-    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
-
-    async def run() -> None:
-        await h._maybe_consume_checkin_expect(long_in, "u1", "tok")
-
-    asyncio.run(run())
-
-    assert get_slot_body(hook_cfg, "10:00", tdt) == short_out
-
-
-def test_checkin_long_reply_fallback_truncation(hook_cfg: dict) -> None:
-    set_state(hook_cfg, "active")
-    tdt = datetime(2026, 5, 4, 10, 0, 0)
-    ts.ensure_timeline_file(hook_cfg, tdt)
-    hook_cfg["timeline"]["compact_max_chars"] = 12
-    long_in = "abcdefghijklmnopqrstuvwxyz"
-    h = _H(hook_cfg, acp=_ACP(raises=True))
-
-    set_checkin_expect(hook_cfg, "u1", "2026-05-04", "10:00")
-
-    async def run() -> None:
-        await h._maybe_consume_checkin_expect(long_in, "u1", "tok")
-
-    asyncio.run(run())
-
-    slot = get_slot_body(hook_cfg, "10:00", tdt)
-    assert len(slot) == 12
-    assert slot == long_in[:12]
+    assert get_checkin_expect(hook_cfg, "u1") is not None

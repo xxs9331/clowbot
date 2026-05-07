@@ -1330,6 +1330,13 @@ class Handler(
         if timeline_enabled(self.cfg) and bool(tl.get("checkin_enabled")):
             r = mark_daily_opening_chat(self.cfg, from_user)
             if r == "woke":
+                # 重启后清理旧 expect，避免盲等前一天的 expect 消费首条消息
+                from utils.timeline_state import _read_state, _write_state
+
+                st = _read_state(self.cfg)
+                if st.get("checkin_expect"):
+                    st["checkin_expect"] = {}
+                    _write_state(self.cfg, st)
                 log_flow_event(
                     stage="checkin",
                     route="first_chat_wake",

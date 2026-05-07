@@ -129,6 +129,9 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         f"【生活日志节选】\n{ctx['life_log_tail']}\n\n"
         f"【项目总览节选】\n{ctx['projects_tail']}\n\n"
         "请直接输出该行消息："
+        "\n\n（补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，"
+        "那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。"
+        "如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）"
     )
 
     sid = getattr(handler, "unified_session_id", "") or getattr(handler, "session_id", "")
@@ -220,6 +223,9 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         f"【生活日志节选】\n{ctx['life_log_tail']}\n\n"
         f"【项目总览节选】\n{ctx['projects_tail']}\n\n"
         "请直接输出该行消息："
+        "\n\n（补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，"
+        "那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。"
+        "如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）"
     )
 
     sid = getattr(handler, "unified_session_id", "") or getattr(handler, "session_id", "")
