@@ -154,7 +154,28 @@ class DispatcherMixin:
         out = [TOOL_DECISION_NONE]
         if any(k in t for k in ("提醒", "叫我", "闹钟", "别忘")):
             out.append(TOOL_REMIND_ADD)
-        if any(k in t for k in ("记录", "记一下", "改签", "体重", "跑步", "快递")):
+        if any(
+            k in t
+            for k in (
+                "记录",
+                "记一下",
+                "改签",
+                "体重",
+                "跑步",
+                "快递",
+                "吃了",
+                "喝过",
+                "喝了",
+                "用药",
+                "吃药",
+                "睡了",
+                "午饭",
+                "晚饭",
+                "早饭",
+                "早餐",
+                "晚餐",
+            )
+        ):
             out.append(TOOL_RECORD_ADD)
         if t.startswith("追加") or any(
             k in t for k in ("追加到时间轴", "追加时间轴", "追加到时间线")
@@ -185,6 +206,22 @@ class DispatcherMixin:
             )
         if len(t) < 20 and _CANDIDATE_TIME_HINT_RE.search(t):
             out.append(TOOL_REMIND_ADD)
+            # 短句+钟点常为「已发生事实」而非提醒，同时暴露生活记录以免只选 remind
+            if any(
+                k in t
+                for k in (
+                    "吃了",
+                    "睡了",
+                    "喝了",
+                    "药",
+                    "饭",
+                    "面",
+                    "跑完",
+                    "走了",
+                    "体重",
+                )
+            ):
+                out.append(TOOL_RECORD_ADD)
         # 相对未来日期 + 钟点 + 备忘语义 → 优先提醒（与时间轴状态句区分）
         if any(x in t for x in ("三天后", "两天后", "明天", "后天", "下周", "过几天")):
             if any(x in t for x in ("点", ":", "：", "半")) and any(
@@ -239,12 +276,16 @@ class DispatcherMixin:
             f'- "{TOOL_TODO_MERGE_NEW_ITEMS}": {{"tasks": ["项1", ...]}}\n'
             f'- "{TOOL_TODO_REORDER}": {{"reorder": [...]}}，元素集合须与 remaining_tasks 相同，仅顺序可变\n'
             f'- 其它 todo.*：通常为 {{}}\n'
-            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", "timeline_line": "可选，已为时间轴准备好的短句"}}\n'
+            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", '
+            f'"event_hhmm": "HH:MM?", "timeline_line": "可选，已为时间轴准备好的短句"}}\n'
+            f'  （event_hhmm：用户已发生事件所指钟点，如「15:00 吃了弥宁」→ "15:00"；下午三点→"15:00"；无则省略，系统用当前时刻）\n'
             f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
             f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}（slot 省略则用当前半格）\n\n'
             "分流：\n"
-            f'- 用户明确要求写时间轴追加：以「追加」开头的状态句，或「追加到时间轴/追加时间轴」等旧说法，且要写盘 → {TOOL_TIMELINE_APPEND}（优先于仅写生活日志）\n'
-            f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
+            f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}；时间轴由记录写盘后再回写，禁止用 {TOOL_TIMELINE_APPEND} 绕过记录\n'
+            f'- 句中含用户所指事件钟点（如 15:00、下午3点）的已发生事实 → {TOOL_RECORD_ADD}，且须在 payload 填 event_hhmm（规范 HH:MM）\n'
+            f'- {TOOL_TIMELINE_APPEND} 仅用于：用户明确要求「追加到时间轴/追加时间轴」或句首「追加…」且意图是只改时间轴展示、不是记生活日志；不得用于用药/吃饭等已发生记录\n'
+            f'- 用户明确要求写时间轴追加（上一行所述窄口径）且要写盘 → {TOOL_TIMELINE_APPEND}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
             f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点（如两点、14:00）且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录）\n'
             f'- 待办推进/完成/重排/跳过/放弃 → todo.*\n'
@@ -292,11 +333,18 @@ class DispatcherMixin:
         """把 Handler 提供的结构化记忆拼进 unified 上下文。
 
         分层注入：
-          - 顶部：structured_state_block（现在在做什么）
+          - 顶部：shared_history（最近 5 轮对话流，让 reply 自带上下文感知）
+          - 上中：structured_state_block（现在在做什么）
           - 中部：recent_decisions_json（刚才做了什么，现有）
           - 底部：context_block（本轮上下文）
         """
-        # 顶部：结构化 state
+        shared_hist = ""
+        gs_hist = getattr(self, "_build_shared_history", None)
+        if callable(gs_hist):
+            try:
+                shared_hist = (gs_hist(user_id) or "").strip()
+            except Exception:
+                shared_hist = ""
         state_block = ""
         gs = getattr(self, "_structured_state_context_block", None)
         if callable(gs):
@@ -304,7 +352,6 @@ class DispatcherMixin:
                 state_block = (gs(user_id) or "").strip()
             except Exception:
                 state_block = ""
-        # 中部：最近决策
         extra_ctx = ""
         ge = getattr(self, "_extra_unified_context", None)
         if callable(ge):
@@ -313,6 +360,8 @@ class DispatcherMixin:
             except Exception:
                 extra_ctx = ""
         parts = []
+        if shared_hist:
+            parts.append(shared_hist)
         if state_block:
             parts.append(state_block)
         if extra_ctx:
@@ -337,12 +386,16 @@ class DispatcherMixin:
             f'- "{TOOL_TODO_MERGE_NEW_ITEMS}": {{"tasks": ["项1", ...]}}\n'
             f'- "{TOOL_TODO_REORDER}": {{"reorder": [...]}}，元素集合须与 remaining_tasks 相同，仅顺序可变\n'
             f'- 其它 todo.*：通常为 {{}}\n'
-            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", "timeline_line": "可选"}}\n'
+            f'- "{TOOL_RECORD_ADD}": {{"text": "...", "category": "身体|运动|阅读|事务", "event_date": "YYYY-MM-DD?", '
+            f'"event_hhmm": "HH:MM?", "timeline_line": "可选"}}\n'
+            f'  （event_hhmm：已发生事件在用户句中的钟点，如「15:00 吃了弥宁」→ "15:00"；无则省略）\n'
             f'- "{TOOL_REMIND_ADD}": {{"text": "...", "hhmm": "HH:MM", "event_date": "YYYY-MM-DD?"}}\n'
             f'- "{TOOL_TIMELINE_APPEND}": {{"text": "...", "slot": "HH:MM?"}}\n\n'
             "分流规则：\n"
-            f'- 明确要求时间轴追加：句首「追加…」或追加到时间轴/追加时间轴（须带可落盘内容）→ {TOOL_TIMELINE_APPEND}，与仅写生活日志的 {TOOL_RECORD_ADD} 区分；前者优先\n'
-            f'- 已发生的生活事件（体重/饮食/睡眠/快递/出行已落实/已用药等）→ {TOOL_RECORD_ADD}\n'
+            f'- 已发生的生活事件 → {TOOL_RECORD_ADD}；时间轴仅由记录流程回写，禁止用 {TOOL_TIMELINE_APPEND} 写用药/饮食/睡眠等已发生事实\n'
+            f'- 句中含事件钟点的已发生事实 → {TOOL_RECORD_ADD} 且须填 event_hhmm（HH:MM）\n'
+            f'- {TOOL_TIMELINE_APPEND} 仅用于：句首「追加…」或「追加到时间轴/追加时间轴」且用户意图是只改时间轴、不写生活记录节；窄口径，与 {TOOL_RECORD_ADD} 区分\n'
+            f'- 明确要求时间轴追加（上一行窄口径）且须带可落盘内容 → {TOOL_TIMELINE_APPEND}\n'
             f'- 设提醒/叫我/别忘了+具体时间 → {TOOL_REMIND_ADD}\n'
             f'- 含「明天/后天/三天后/下周…」等相对未来日期且含钟点且为提醒/叫我/别忘了 → {TOOL_REMIND_ADD}（优先于生活记录；与「过去半小时在做什么」类状态句区分）\n'
             f'- 待办推进/完成/重排/跳过/放弃 → todo.*\n'

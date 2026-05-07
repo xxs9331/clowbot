@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from config import _log_reasoning
@@ -14,6 +15,23 @@ from utils.flow_log import log_flow_event
 from utils.time_utils import time_str
 from utils.timeline_compact import compact_timeline_line
 from utils.tool_names import DOMAIN_RECORD, TOOL_RECORD_ADD
+
+_EVENT_HHMM_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def _effective_hhmm(payload: dict) -> str:
+    """用户/模型给出的发生钟点；合法 HH:MM 则用，否则回退当前时刻。"""
+    raw = str(payload.get("event_hhmm") or "").strip()
+    if not raw or not _EVENT_HHMM_RE.match(raw):
+        return time_str()
+    parts = raw.split(":")
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return time_str()
+    if h < 0 or h > 23 or m < 0 or m > 59:
+        return time_str()
+    return f"{h:02d}:{m:02d}"
 
 
 class RecordCoachMixin:
@@ -31,7 +49,7 @@ class RecordCoachMixin:
             return True
         category = str(payload.get("category") or "").strip() or "事务"
         event_date = str(payload.get("event_date") or "").strip()
-        now_hm = time_str()
+        clock_hm = _effective_hhmm(payload)
         v = self.cfg["vault"]
         prompt = build_coach_write_prompt(
             DOMAIN_RECORD,
@@ -41,7 +59,7 @@ class RecordCoachMixin:
                 "op": "add",
                 "text": text,
                 "category": category,
-                "now_hhmm": now_hm,
+                "now_hhmm": clock_hm,
                 **({"event_date": event_date} if event_date else {}),
             },
             output_contract=OUTPUT_WRITE_CONFIRM,
@@ -75,7 +93,7 @@ class RecordCoachMixin:
                         tdt = datetime.now()
                 else:
                     tdt = datetime.now()
-                slot = slot_for_hhmm(now_hm, tdt)
+                slot = slot_for_hhmm(clock_hm, tdt)
                 tl_raw = str(payload.get("timeline_line") or "").strip()
                 line_src = tl_raw if tl_raw else (f"{category}·{text}" if category else text)
                 line = await compact_timeline_line(

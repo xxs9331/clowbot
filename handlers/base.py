@@ -88,6 +88,9 @@ class Handler(
         self._auto_advance_used_steps: int = 0
         # agent permission 挂起：每用户仅维护一个待确认请求（v1）
         self._pending_agent_permission: dict[str, int] = {}
+        # 共享对话历史窗口：按 from_user 分桶，注入 unified prompt 让 reply 自带跨轮上下文
+        self._conversation_window: dict[str, list[dict]] = {}
+        self._conversation_window_max: int = 10
         if hasattr(self.acp, "set_permission_request_handler"):
             self.acp.set_permission_request_handler(self._on_acp_permission_request)
 
@@ -626,6 +629,39 @@ class Handler(
         except Exception:
             pass
 
+    def _append_conversation_user(self, user_id: str, text: str) -> None:
+        """用户消息进入共享对话窗口（按 from_user 分桶）。"""
+        t = (text or "").strip()
+        if not user_id or not t or t.startswith("/") or len(t) < 2:
+            return
+        bucket = self._conversation_window.setdefault(user_id, [])
+        bucket.append({"role": "user", "text": t[:300], "ts": time.time()})
+        while len(bucket) > self._conversation_window_max:
+            bucket.pop(0)
+
+    def _append_conversation_assistant(self, user_id: str, text: str) -> None:
+        """助手 reply 进入共享对话窗口（仅 LLM unified 决策路径调用）。"""
+        t = (text or "").strip()
+        if not user_id or not t:
+            return
+        bucket = self._conversation_window.setdefault(user_id, [])
+        bucket.append({"role": "assistant", "text": t[:300], "ts": time.time()})
+        while len(bucket) > self._conversation_window_max:
+            bucket.pop(0)
+
+    def _build_shared_history(self, user_id: str | None = None) -> str:
+        """供 unified prompt 注入的对话历史块（最近 5 轮）。无 user_id 返回空串。"""
+        if not user_id:
+            return ""
+        bucket = self._conversation_window.get(user_id) or []
+        if not bucket:
+            return ""
+        lines = ["共享对话历史（最近 5 轮）:"]
+        for m in bucket[-5:]:
+            role_label = "用户" if m.get("role") == "user" else "助手"
+            lines.append(f"- {role_label}: {str(m.get('text', ''))[:200]}")
+        return "\n".join(lines) + "\n"
+
     def _remember_unified_decision(self, from_user: str, decision: dict) -> None:
         """成功执行 tool 后写入短期记忆（仅关键字段，控制体积）。"""
         if not from_user:
@@ -727,11 +763,12 @@ class Handler(
         # 域会话启动时一次性注入角色约束，后续写盘只传 JSON envelope。
         v = self.cfg["vault"]
         sys_prompt = build_system_prompt(v["root"], v["daily_log_dir"])
+        shared_hist = self._build_shared_history()  # init 阶段必空，仅作对称占位
         prime_tasks = [
             self.acp.prompt(
                 self.todo_session_id,
                 (
-                    f"{sys_prompt}\n\n"
+                    f"{sys_prompt}\n\n{shared_hist}"
                     "这是待办域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
                 ),
                 trace_tag="prime_todo",
@@ -739,7 +776,7 @@ class Handler(
             self.acp.prompt(
                 self.record_session_id,
                 (
-                    f"{sys_prompt}\n\n"
+                    f"{sys_prompt}\n\n{shared_hist}"
                     "这是记录域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
                 ),
                 trace_tag="prime_record",
@@ -747,7 +784,7 @@ class Handler(
             self.acp.prompt(
                 self.remind_session_id,
                 (
-                    f"{sys_prompt}\n\n"
+                    f"{sys_prompt}\n\n{shared_hist}"
                     "这是提醒域上下文。后续输入主要是 JSON 工具调用，请严格遵循对应 SKILL 执行。"
                 ),
                 trace_tag="prime_remind",
@@ -758,7 +795,7 @@ class Handler(
                 self.acp.prompt(
                     self.debug_session_id,
                     (
-                        f"{sys_prompt}\n\n"
+                        f"{sys_prompt}\n\n{shared_hist}"
                         "这是调试域上下文。使用更便宜的模型，用于 prompt 迭代与流程验证。"
                     ),
                     trace_tag="prime_debug",
@@ -974,6 +1011,8 @@ class Handler(
     ) -> None:
         """规则守卫 → 快通道 → 意图分类 → 统一决策 → 安全兜底。"""
         msg_trace = uuid.uuid4().hex[:12]
+        # 进入路由即记录用户消息（覆盖 handle 与 eval 两条路径）
+        self._append_conversation_user(from_user, text)
         log_flow_event(
             stage="route",
             route="chat_pipeline",
@@ -1126,6 +1165,8 @@ class Handler(
         decision = await self._llm_unified_decide(
             from_user, text, intent_hint=None
         )
+        # LLM 已生成 reply，无论是否被 _apply 接受都记入对话窗口
+        self._append_conversation_assistant(from_user, decision.get("reply", ""))
         handled = await self._apply_unified_decision(
             decision,
             from_user,

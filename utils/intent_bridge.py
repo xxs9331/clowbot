@@ -70,6 +70,9 @@ def _record_add_decision(slots: dict) -> dict | None:
     ed = (slots.get("event_date") or "").strip()
     if ed:
         payload["event_date"] = ed
+    eh = (slots.get("event_hhmm") or slots.get("hhmm") or "").strip()
+    if eh:
+        payload["event_hhmm"] = eh
     return {"tool": TOOL_RECORD_ADD, "payload": payload, "reply": ""}
 
 

@@ -136,6 +136,31 @@ def test_record_add_with_event_date():
     assert d["payload"]["event_date"] == "2026-05-02"
 
 
+def test_record_add_with_event_hhmm_slot():
+    d = intent_to_decision(
+        {
+            "intent": "record_add",
+            "slots": {"text": "吃了弥宁", "category": "身体", "event_hhmm": "15:00"},
+            "confidence": 0.9,
+        }
+    )
+    assert d["tool"] == TOOL_RECORD_ADD
+    assert d["payload"]["event_hhmm"] == "15:00"
+
+
+def test_record_add_slots_hhmm_maps_to_event_hhmm():
+    d = intent_to_decision(
+        {
+            "intent": "record_add",
+            "slots": {"text": "午饭", "hhmm": "12:30"},
+            "confidence": 0.9,
+        }
+    )
+    assert d["tool"] == TOOL_RECORD_ADD
+    assert d["payload"]["event_hhmm"] == "12:30"
+    assert "hhmm" not in d["payload"]
+
+
 def test_query_intents_yield_to_unified():
     assert intent_to_decision({"intent": "query_todo", "slots": {}, "confidence": 0.9}) is None
     assert intent_to_decision({"intent": "query_remind", "slots": {}, "confidence": 0.9}) is None
