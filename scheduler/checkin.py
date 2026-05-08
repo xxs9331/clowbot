@@ -376,6 +376,20 @@ async def checkin_loop(handler):
                 continue
 
             now = datetime.now()
+            # 早上 7 点自动唤醒（每天重置，即使昨晚手动 /睡觉）
+            if now.hour == 7 and now.minute < 30:
+                if get_state(cfg) == "sleep":
+                    set_state(cfg, "active")
+                    log_flow_event(
+                        stage="checkin",
+                        route="auto_wake_7am",
+                        user_text="",
+                        extra={"note": "daily_auto_wake"},
+                    )
+                    print("[Bot] 早上 7 点，自动唤醒 checkin")
+                await asyncio.sleep(60)
+                continue
+            # 凌晨 2 点强制休眠
             if now.hour == 2 and now.minute < 30:
                 if get_state(cfg) == "active":
                     set_state(cfg, "sleep")

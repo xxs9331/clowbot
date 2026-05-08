@@ -26,13 +26,14 @@ cases:
     expect_tool_counts:
       todo.done_current: 1
 
-  # 简单：查看待办 → 走 local_view，不进入 unified apply
+  # 简单：查看待办（自然语言）→ 不再前置拦截，离线 acp=None 下走 safe_fallback
+  # 想看本地📋节请用 /待办 slash 命令（只在 handle() 里生效，evaluator 不覆盖）
   - id: local_view_todo
     tier: simple
     input: "查看待办"
-    expect_eval_extra_branch: "local_view"
+    expect_eval_extra_branch: "safe_fallback"
     expect_reply_contains:
-      - "待办"
+      - "记一下"
 
   - id: p1b_done_when_queue_tail
     tier: simple

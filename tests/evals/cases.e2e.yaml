@@ -7,11 +7,11 @@ version: 1
 
 cases:
   # ─── 简单（5）：规则 / 快通道 / 兜底 ───
+  # 自然语言「查看待办」改为走 unified（local_view NL 拦截已下线，slash /待办 仍生效）
   - id: e01_local_view_todo
     tier: simple
     input: "查看待办"
-    expect_eval_extra_branch: "local_view"
-    expect_reply_contains: ["待办"]
+    expect_wx_nonempty: true
 
   - id: e02_fast_done_current
     tier: simple
