@@ -9,8 +9,6 @@ from datetime import datetime
 # ─── 意图类型 ───
 INTENT_REMIND = "remind"        # 设置提醒
 INTENT_TODO = "todo"            # 添加待办
-INTENT_QUERY_TODO = "query_todo"    # 查看待办
-INTENT_QUERY_REMIND = "query_remind"  # 查看提醒
 INTENT_TODO_DONE = "todo_done"      # 当前待办完成
 INTENT_TODO_NOT_DONE = "todo_not_done"  # 当前待办未完成
 INTENT_TODO_NEXT = "todo_next"      # 询问当前应做哪个待办
@@ -23,8 +21,6 @@ def detect_intent(text: str) -> tuple[str, str]:
     返回 (intent_type, data):
       - (INTENT_REMIND, "07:30 上班")     → 让 AI 写入日志提醒节
       - (INTENT_TODO, "买牛奶")            → 让 AI 写入日志待办节
-      - (INTENT_QUERY_TODO, "")            → 读日志待办节返回
-      - (INTENT_QUERY_REMIND, "")          → 读日志提醒节返回
       - (INTENT_NONE, "")                  → 走正常生活日志流程
     """
     text = text.strip()
@@ -37,19 +33,6 @@ def detect_intent(text: str) -> tuple[str, str]:
         or ("没看懂" in text and "怎么记" in text)
     ):
         return INTENT_NONE, ""
-
-    # ─── 查询类意图（优先） ───
-    query_todo_kws = ["查看待办", "看待办", "待办列表", "待办清单", "有什么待办",
-                       "有什么事", "要做什么", "今天的待办", "今日待办"]
-    query_remind_kws = ["查看提醒", "看提醒", "提醒列表", "有什么提醒", "今天的提醒", "今日提醒"]
-
-    for kw in query_todo_kws:
-        if kw in text:
-            return INTENT_QUERY_TODO, ""
-
-    for kw in query_remind_kws:
-        if kw in text:
-            return INTENT_QUERY_REMIND, ""
 
     # ─── 待办推进类意图 ───
     todo_next_kws = ["先做哪个", "现在做哪个", "我先做什么", "接下来做什么", "下一个做什么"]

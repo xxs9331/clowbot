@@ -10,8 +10,6 @@ from pathlib import Path
 
 from acp.opencode_client import OpenCodeACP, build_system_prompt
 from utils.intent import (
-    INTENT_QUERY_REMIND,
-    INTENT_QUERY_TODO,
     INTENT_REMIND,
     detect_intent,
 )
@@ -1101,25 +1099,6 @@ class Handler(
             )
             return
 
-        intent_early, _ = detect_intent(text)
-        if intent_early == INTENT_QUERY_TODO:
-            log_flow_event(
-                stage="route",
-                route="query_todo_intent",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={"intent": intent_early, "trace": msg_trace},
-            )
-            if getattr(self, "_eval_mode", False):
-                ex = getattr(self, "_eval_extras", None)
-                if isinstance(ex, list):
-                    ex.append({"branch": "local_view", "kind": "todo"})
-            await self._local_view_with_optional_llm_fallback(
-                "todo", from_user, context_token, text
-            )
-            return
-
         fast_decision = build_fast_unified_decision(text, from_user, self._todo_queues)
         if fast_decision:
             log_flow_event(
@@ -1272,20 +1251,6 @@ class Handler(
             await self._maybe_checkpoint(from_user)
             print(f"[Bot] ⏰ 提醒: {data}")
             return
-        if intent == INTENT_QUERY_REMIND:
-            log_flow_event(
-                stage="route",
-                route="query_remind_intent",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={"trace": msg_trace},
-            )
-            await self._local_view_with_optional_llm_fallback(
-                "remind", from_user, context_token, text
-            )
-            return
-
         log_flow_event(
             stage="route",
             route="safe_fallback",
@@ -1363,6 +1328,22 @@ class Handler(
             cmd, _, args_tail = slash_body.partition(" ")
             cmd = cmd.strip()
             args = args_tail.strip()
+            cmd = {
+                "查看模板": "模板",
+                "看模板": "模板",
+                "查看时间轴": "时间轴",
+                "看时间轴": "时间轴",
+                "查看待办": "待办",
+                "看待办": "待办",
+                "查看代办": "代办",
+                "看代办": "代办",
+                "查看提醒": "提醒",
+                "看提醒": "提醒",
+                "查看日志": "日志",
+                "看日志": "日志",
+                "查看简报": "简报",
+                "看简报": "简报",
+            }.get(cmd, cmd)
 
             kind_map = {
                 "待办": "todo",
@@ -1429,20 +1410,6 @@ class Handler(
                 user_text=text,
                 from_user=from_user,
                 session_id=self.session_id,
-            )
-            return
-
-        local_kind = self._detect_local_view_kind(text)
-        if local_kind:
-            log_flow_event(
-                stage="route",
-                route=f"local_view:{local_kind}",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-            )
-            await self._local_view_with_optional_llm_fallback(
-                local_kind, from_user, context_token, text
             )
             return
 

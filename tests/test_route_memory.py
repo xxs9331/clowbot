@@ -119,6 +119,25 @@ def test_tool_status_debounce(tmp_path: Path):
     assert len(wx.sent) == 1
 
 
+def test_slash_view_template_alias_not_ignored(tmp_path: Path):
+    h = _build_handler(tmp_path)
+    template_file = tmp_path / "3-Resources" / "模板库" / "待办模板总表.md"
+    template_file.parent.mkdir(parents=True, exist_ok=True)
+    template_file.write_text("模板内容", encoding="utf-8")
+
+    asyncio.run(
+        h.handle(
+            {
+                "type": "text",
+                "text": "/查看模板",
+                "from": "u1",
+                "context_token": "",
+            }
+        )
+    )
+    assert "模板内容" in h.wx.sent[-1]
+
+
 def test_structured_state_collects_list_str_summary(tmp_path: Path):
     h = _build_handler(tmp_path)
     decision = {

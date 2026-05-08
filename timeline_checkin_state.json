@@ -1,9 +1,15 @@
 {
-  "mode": "active",
+  "mode": "sleep",
   "last_ping_date": "2026-05-08",
-  "last_ping_slot": "00:30",
-  "checkin_expect": {},
-  "updated_at": "2026-05-08T00:11:48",
+  "last_ping_slot": "01:30",
+  "checkin_expect": {
+    "o9cq8094I2pCEmsF9mWkYPRqZU_k@im.wechat": {
+      "date": "2026-05-08",
+      "slot": "01:30",
+      "ts": 1778175004.815006
+    }
+  },
+  "updated_at": "2026-05-08T01:30:36",
   "first_chat_date_by_user": {
     "o9cq8094I2pCEmsF9mWkYPRqZU_k@im.wechat": "2026-05-08"
   }

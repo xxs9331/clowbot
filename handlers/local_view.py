@@ -104,38 +104,6 @@ class LocalViewMixin:
         words = re.split(r"[\s,，。！？、]+", raw)
         return [w for w in words if len(w) >= 2]
 
-    @staticmethod
-    def _wants_record_recent_snippet(raw: str) -> bool:
-        """是否查询「最近若干条记录/记忆」（读今日日记 📝 记录节，非写入）。"""
-        if not raw.strip():
-            return False
-        query_markers = (
-            "找",
-            "查",
-            "翻",
-            "列",
-            "给",
-            "搜",
-            "哪些",
-            "几条",
-            "多少",
-            "最近",
-            "最新",
-            "看下",
-            "看看",
-            "说一下",
-            "讲讲",
-            "回忆",
-            "回想",
-        )
-        if "记忆" in raw and any(m in raw for m in query_markers):
-            return True
-        if ("最近" in raw or "最新" in raw) and "条" in raw and (
-            "记录" in raw or "记忆" in raw
-        ):
-            return True
-        return False
-
     def _compose_local_view_body(
         self, kind: str, content: str, user_text: str = ""
     ) -> str:
@@ -174,49 +142,6 @@ class LocalViewMixin:
         if kind == "todo":
             section = self._extract_section(content, "📋", "待办")
             return section if section else "今日暂无待办内容"
-        return ""
-
-    def _detect_local_view_kind(self, text: str) -> str:
-        raw = (text or "").strip()
-        if not raw:
-            return ""
-        # 简报优先（避免与「日志」子串误触）
-        brief_kws = [
-            "查看简报", "今日简报", "今天简报", "看下简报", "看看简报",
-            "日志简报", "今日概况", "今天概况",
-        ]
-        if any(k in raw for k in brief_kws):
-            return "brief"
-        # 「最近几条记忆/记录」：在 unified LLM 之前真实读盘，避免只回敷衍话术
-        if self._wants_record_recent_snippet(raw):
-            return "record_recent"
-        log_kws = [
-            "查看今日日志", "查看今天日志", "今日日志", "今天日志",
-            "查看日志", "看日志", "看下日志", "看看日志", "打开日志",
-            "给我日志", "日志全文", "今日日志内容", "今天日志内容",
-            "今日日记", "今天日记", "看下日记",
-        ]
-        if any(k in raw for k in log_kws):
-            return "log"
-        record_kws = [
-            "查看记录", "看记录", "看下记录", "看看记录",
-            "今日记录", "今天记录", "记录列表",
-        ]
-        if any(k in raw for k in record_kws):
-            return "record"
-        remind_kws = [
-            "查看提醒", "看提醒", "看下提醒", "看看提醒",
-            "提醒列表", "今日提醒", "今天提醒", "有什么提醒",
-        ]
-        if any(k in raw for k in remind_kws):
-            return "remind"
-        todo_kws = [
-            "查看待办", "看待办", "看下待办", "看看待办",
-            "待办列表", "待办清单", "今日待办", "今天待办",
-            "有什么待办", "待办呢",
-        ]
-        if any(k in raw for k in todo_kws):
-            return "todo"
         return ""
 
     async def _send_local_today_view(
