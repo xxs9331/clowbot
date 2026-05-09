@@ -72,13 +72,21 @@ class OpenCodeACP:
         ] = None
         self._permission_wait_timeout_sec: float = 300.0
 
-    def _build_prompt_params(self, session_id: str, prompt_parts: list[dict]) -> dict:
+    def _build_prompt_params(
+        self,
+        session_id: str,
+        prompt_parts: list[dict],
+        *,
+        extra: dict | None = None,
+    ) -> dict:
         params = {
             "sessionId": session_id,
             "prompt": prompt_parts,
         }
         if self.max_tokens > 0:
             params["maxTokens"] = self.max_tokens
+        if extra:
+            params.update(dict(extra))
         return params
 
     # ─── 生命周期管理 ───
@@ -719,6 +727,14 @@ class OpenCodeACP:
                 return obj
         except Exception:
             pass
+        try:
+            import json_repair
+
+            repaired = json_repair.repair_json(s, return_objects=True)
+            if isinstance(repaired, dict):
+                return repaired
+        except Exception:
+            pass
         dec = json.JSONDecoder()
         for i, ch in enumerate(s):
             if ch != "{":
@@ -1288,6 +1304,7 @@ class OpenCodeACP:
         *,
         trace_tag: str = "prompt",
         session_context: dict[str, Any] | None = None,
+        prompt_extra: dict | None = None,
     ) -> tuple:
         """发送文本消息，返回 (reply_text, reasoning_text)"""
         async with self._rpc_lock:
@@ -1298,6 +1315,7 @@ class OpenCodeACP:
                 self._build_prompt_params(
                     session_id,
                     [{"type": "text", "text": message}],
+                    extra=prompt_extra,
                 ),
             )
             collected = await self._collect_prompt_response(
@@ -1395,6 +1413,39 @@ class OpenCodeACP:
         props = json_schema.get("properties") or {}
         has_reply_field = isinstance(props, dict) and "reply" in props
         best_effort = ""
+        retry_feedback = ""
+
+        def _build_retry_feedback(candidate: dict | None, *, source: str) -> str:
+            if not isinstance(candidate, dict):
+                return f"{source} 未解析出合法 JSON 对象。"
+            required = json_schema.get("required") or []
+            missing = [str(k) for k in required if k not in candidate]
+            if missing:
+                return "缺少必填字段: " + ", ".join(missing)
+            schema_props = json_schema.get("properties") or {}
+            type_hints: list[str] = []
+            for key, spec in schema_props.items():
+                if key not in candidate or not isinstance(spec, dict):
+                    continue
+                expected = spec.get("type")
+                value = candidate.get(key)
+                if expected == "string" and not isinstance(value, str):
+                    type_hints.append(f"{key} 应为 string")
+                elif expected == "object" and not isinstance(value, dict):
+                    type_hints.append(f"{key} 应为 object")
+                elif expected == "array" and not isinstance(value, list):
+                    type_hints.append(f"{key} 应为 array")
+                elif expected == "number" and not isinstance(value, (int, float)):
+                    type_hints.append(f"{key} 应为 number")
+                elif expected == "integer" and not isinstance(value, int):
+                    type_hints.append(f"{key} 应为 integer")
+                elif expected == "boolean" and not isinstance(value, bool):
+                    type_hints.append(f"{key} 应为 boolean")
+            if type_hints:
+                return "类型不匹配: " + "; ".join(type_hints[:3])
+            if not self._validate_schema_obj(candidate, json_schema):
+                return "JSON 未通过 schema 校验（可能是 enum 或额外字段问题）。"
+            return ""
 
         def _finalize_out(
             base: dict,
@@ -1444,10 +1495,19 @@ class OpenCodeACP:
             return out
 
         for i in range(attempts):
+            attempt_prompt = structured_prompt
+            if retry_feedback:
+                attempt_prompt = (
+                    f"{structured_prompt}\n\n"
+                    "上次输出存在格式问题，请只修复格式，不要改语义内容。\n"
+                    f"错误摘要：{retry_feedback}\n"
+                    "再次强调：只输出一个合法 JSON 对象，不要输出解释文字。"
+                )
             reply, reasoning = await self.prompt(
                 session_id,
-                structured_prompt,
+                attempt_prompt,
                 trace_tag=f"{trace_tag}#{i + 1}",
+                prompt_extra={"response_format": {"type": "json_object"}},
             )
             best_effort = self._accumulate_best_effort_from_raw(
                 best_effort, reply or "", reasoning or "", json_schema
@@ -1478,6 +1538,12 @@ class OpenCodeACP:
                     return _finalize_out(
                         projected, spill_text=spill_r, attempt_idx=i + 1
                     )
+
+            retry_feedback = (
+                _build_retry_feedback(obj, source="reply")
+                or _build_retry_feedback(obj2, source="reasoning")
+                or "未输出可解析且符合 schema 的 JSON 对象。"
+            )
 
         log_flow_event(
             stage="route",
@@ -1654,4 +1720,3 @@ def build_system_prompt(
 - "N月N日" / "N.N" / "N月N号" → 当前年份的该日期
 - "明天" / "后天" → 相对日期
 - 无明确日期 → 使用今天"""
-

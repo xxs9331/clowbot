@@ -73,28 +73,39 @@ class ImageMixin:
             user_text_for_route = f"[图片] {image_desc}"
             if text:
                 user_text_for_route = f"{user_text_for_route}\n附言：{text}"
-
-            decision = await self._llm_unified_decide(from_user, user_text_for_route)
-            log_flow_event(
-                stage="route",
-                route="image_to_unified",
-                user_text=user_text_for_route,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={"decision": decision},
-            )
-            handled = await self._apply_unified_decision(
-                decision,
-                from_user,
-                context_token,
-                user_text=user_text_for_route,
-            )
-            if not handled:
-                await self.wx.send_text(
-                    "我看到了图片，没看出要记什么。要我记成生活记录吗？",
+            async def _legacy_runner():
+                decision = await self._llm_unified_decide(from_user, user_text_for_route)
+                log_flow_event(
+                    stage="route",
+                    route="image_to_unified",
+                    user_text=user_text_for_route,
+                    from_user=from_user,
+                    session_id=self.session_id,
+                    extra={"decision": decision},
+                )
+                handled = await self._apply_unified_decision(
+                    decision,
                     from_user,
                     context_token,
+                    user_text=user_text_for_route,
                 )
+                if not handled:
+                    await self.wx.send_text(
+                        "我看到了图片，没看出要记什么。要我记成生活记录吗？",
+                        from_user,
+                        context_token,
+                    )
+
+            if self._dual_dispatcher is not None:
+                await self._dual_dispatcher.dispatch_text(
+                    text=user_text_for_route,
+                    from_user=from_user,
+                    context_token=context_token,
+                    legacy_runner=_legacy_runner,
+                    send_text=self.wx.send_text,
+                )
+            else:
+                await _legacy_runner()
 
         except Exception as e:  # noqa: BLE001
             print(f"[Bot] 图片处理错误: {e}")

@@ -83,7 +83,8 @@ def test_project_obj_strips_extra_keys_when_additional_properties_false():
 def test_prompt_structured_attaches_spill_when_reply_extra_key():
     acp = OpenCodeACP()
 
-    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x", prompt_extra=None):
+        _ = prompt_extra
         return '{"tool":"none","payload":{},"reply":"  复用这句  "}', ""
 
     acp.prompt = _stub_prompt  # type: ignore[method-assign]
@@ -116,7 +117,8 @@ def test_prompt_structured_merges_best_effort_when_final_vague():
     )
     second = '{"tool":"none","payload":{},"reply":"就这个目录 刚给你列过了 还有啥想看的"}'
 
-    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x", prompt_extra=None):
+        _ = prompt_extra
         if trace_tag.endswith("#1"):
             return first, ""
         return second, ""
@@ -158,7 +160,8 @@ def test_prompt_structured_recovers_tool_payload_when_reply_truncated():
         '"event_date":"2026-05-03"},"reply":"好嘞 十点叫你'
     )
 
-    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x", prompt_extra=None):
+        _ = prompt_extra
         return broken, ""
 
     acp.prompt = _stub_prompt  # type: ignore[method-assign]
@@ -195,7 +198,8 @@ def test_prompt_structured_never_merges_reasoning_into_reply():
         "So I should select none."
     )
 
-    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x", prompt_extra=None):
+        _ = prompt_extra
         return final, reasoning
 
     acp.prompt = _stub_prompt  # type: ignore[method-assign]

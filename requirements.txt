@@ -16,3 +16,4 @@ pywin32>=306
 
 # LangGraph v2 (parallel pipeline)
 langgraph>=0.2.0
+json-repair>=0.41.0

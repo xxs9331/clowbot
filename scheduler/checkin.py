@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import PACKAGE_ROOT
+from utils.chore_pool import get_chore_hint
 from utils.flow_log import log_flow_event
 from utils.log_sync import get_log_path
 from utils.timeline_state import (
@@ -61,6 +62,9 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 【项目总览节选】
 {projects_tail}
 
+【琐事池状态】
+{chore_hint}
+
 请直接输出该行消息：
 
 （补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）
@@ -87,6 +91,9 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 
 【项目总览节选】
 {projects_tail}
+
+【琐事池状态】
+{chore_hint}
 
 请直接输出该行消息：
 
@@ -188,6 +195,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         "diary_tail": _snip_file(diary, 2000),
         "life_log_tail": _snip_file(life, 2000),
         "projects_tail": _snip_file(overview, 1200),
+        "chore_hint": get_chore_hint(cfg, slot=slot),
     }
     bot_cfg = cfg.get("bot") or {}
     max_len = int(bot_cfg.get("max_reply_length") or 2000)
@@ -204,6 +212,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         diary_tail=ctx["diary_tail"],
         life_log_tail=ctx["life_log_tail"],
         projects_tail=ctx["projects_tail"],
+        chore_hint=ctx["chore_hint"],
     )
 
     sid = getattr(handler, "unified_session_id", "") or getattr(handler, "session_id", "")
@@ -277,6 +286,7 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         "diary_tail": _snip_file(diary, 2000),
         "life_log_tail": _snip_file(life, 2000),
         "projects_tail": _snip_file(overview, 1200),
+        "chore_hint": get_chore_hint(cfg, slot=slot),
     }
     bot_cfg = cfg.get("bot") or {}
     max_len = int(bot_cfg.get("max_reply_length") or 2000)
@@ -290,6 +300,7 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         diary_tail=ctx["diary_tail"],
         life_log_tail=ctx["life_log_tail"],
         projects_tail=ctx["projects_tail"],
+        chore_hint=ctx["chore_hint"],
     )
 
     sid = getattr(handler, "unified_session_id", "") or getattr(handler, "session_id", "")

@@ -1,6 +1,7 @@
 """写入后副作用钩子表 — 让"写完 X 节后必须 refresh Y 调度器"的责任只在一处声明。
 
 dispatcher 在 _apply_unified_decision 末尾统一调用 run_post_write_hooks，
+LangGraph execute 节点在 vault 带 cfg 时也会调用（与 dispatcher 对齐）。
 业务 coach 不再需要记得调 self.notify_reminder_refresh() 之类。
 
 设计要点：
@@ -38,6 +39,7 @@ def run_post_write_hooks(handler: Any, tool: str, payload: dict | None) -> None:
 
 
 # ─── 默认注册：写完提醒后唤醒 reminder 调度器 ───
+
 
 def _refresh_reminder_scheduler(handler: Any, _payload: dict) -> None:
     fn = getattr(handler, "notify_reminder_refresh", None)

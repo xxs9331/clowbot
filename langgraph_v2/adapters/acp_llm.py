@@ -6,6 +6,7 @@ from typing import Any
 
 from acp.opencode_client import OpenCodeACP
 from handlers.dispatcher import _coalesce_unified_decision, _load_unified_decide_prompts
+from utils.flow_log import log_flow_event
 
 from ..contracts import Decision
 
@@ -186,6 +187,23 @@ class UnifiedDecideLLM:
             d = dict(combined)
             d.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
             tool, payload, reply = _coalesce_unified_decision(d)
+            raw_reply_in_d = str(d.get("reply") or "")
+            if tool == "none" and raw_reply_in_d.strip() and not str(reply or "").strip():
+                log_flow_event(
+                    stage="graph",
+                    route="structured_reply_stripped",
+                    from_user=user_id,
+                    extra={
+                        "msg_trace": raw_reply_in_d[:200],
+                        "raw_reply_len": len(raw_reply_in_d),
+                        "coalesced_reply_len": len(str(reply or "")),
+                        "d_keys": list(d.keys()),
+                    },
+                )
+            if tool == "none" and not str(reply or "").strip():
+                reply = await self._generate_reply(user_text=text, tool=tool, payload=payload)
+            if tool == "none" and not str(reply or "").strip():
+                reply = "我在，继续说。"
             return Decision(tool=tool, payload=payload, reply=reply)
 
         decision_prompt = self._build_decision_only_prompt(
@@ -206,6 +224,8 @@ class UnifiedDecideLLM:
             if spill and tool == "none":
                 return Decision(tool=tool, payload=payload, reply=spill)
             reply = await self._generate_reply(user_text=text, tool=tool, payload=payload)
+            if tool == "none" and not str(reply or "").strip():
+                reply = "我在，继续说。"
             return Decision(tool=tool, payload=payload, reply=reply)
 
         fallback_prompt = (
@@ -218,4 +238,8 @@ class UnifiedDecideLLM:
         )
         obj = self._extract_json_object(raw_reply or "")
         tool, payload, reply = _coalesce_unified_decision(obj if isinstance(obj, dict) else {})
+        if tool == "none" and not str(reply or "").strip():
+            reply = await self._generate_reply(user_text=text, tool=tool, payload=payload)
+        if tool == "none" and not str(reply or "").strip():
+            reply = "我在，继续说。"
         return Decision(tool=tool, payload=payload, reply=reply)

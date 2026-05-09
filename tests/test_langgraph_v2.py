@@ -199,6 +199,71 @@ def test_llm_record_add_path():
     assert "已记录 身体" in out["wx_out"][0]
 
 
+def test_empty_payload_record_add_backfills_user_text():
+    """模型只给 tool、payload 无 text 时，execute 应用用户原文，避免「我没读懂这条记录。」"""
+    llm = _FakeLLM(Decision(tool="record.add", payload={}, reply="记上了"))
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+    out = _run(app.ainvoke({"text": "刚才吃药了", "from_user": "u_backfill_r", "context_token": "ctx"}))
+    assert vault.records and vault.records[0][0] == "刚才吃药了"
+    assert "已记录" in out["wx_out"][0]
+
+
+def test_empty_payload_timeline_append_backfills_user_text():
+    llm = _FakeLLM(Decision(tool="timeline.append", payload={}, reply="好嘞"))
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+    out = _run(app.ainvoke({"text": "吃药了", "from_user": "u_backfill_t", "context_token": "ctx"}))
+    assert vault.timeline and vault.timeline[0][1] == "吃药了"
+    assert "时间轴" in out["wx_out"][0]
+
+
+def test_timeline_payload_uses_content_and_time_aliases():
+    """模型用 content/time 而非 text/slot 时，执行前归一化。"""
+    llm = _FakeLLM(
+        Decision(
+            tool="timeline.append",
+            payload={"time": "03:00", "content": "记账"},
+            reply="好嘞",
+        )
+    )
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+    out = _run(app.ainvoke({"text": "ok，记了", "from_user": "u_alias_tl", "context_token": "ctx"}))
+    assert vault.timeline == [("03:00", "记账")]
+    assert "时间轴" in out["wx_out"][0]
+
+
 def test_slash_reader_path():
     llm = _FakeLLM(Decision(tool="none", payload={}, reply="不会被调用"))
     vault = _FakeVault()
@@ -234,7 +299,7 @@ def test_none_reply_fallback():
 
     out = _run(app.ainvoke({"text": "asdfghjkl", "from_user": "u4", "context_token": "ctx"}))
     assert llm.calls == 1
-    assert "我没看懂这条要怎么记" in out["wx_out"][0]
+    assert "收到" in out["wx_out"][0]
 
 
 def test_slash_log_alias_path():

@@ -11,6 +11,7 @@
 | [05-pre-intent-local.md](05-pre-intent-local.md) | 5 | pre_intent + local_view + 节奏/拓扑（**主文档**） | ⏳ |
 | [05-intent-view.md](05-intent-view.md) | 5 | 早期稿，实施以 05-pre-intent-local 为准 | ⏳ |
 | [06-testing.md](06-testing.md) | 6 | 测试 + 回退机制 | ⏳ |
+| [07-structured-output-compose.md](07-structured-output-compose.md) | 7 | 结构化输出增强 + compose 兜底与可观测 | ⏳ |
 
 ## 不变更清单
 
