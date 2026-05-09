@@ -90,6 +90,7 @@ class Handler(
         # 共享对话历史窗口：按 from_user 分桶，注入 unified prompt 让 reply 自带跨轮上下文
         self._conversation_window: dict[str, list[dict]] = {}
         self._conversation_window_max: int = 10
+        self._dual_dispatcher = None
         if hasattr(self.acp, "set_permission_request_handler"):
             self.acp.set_permission_request_handler(self._on_acp_permission_request)
 
@@ -865,6 +866,189 @@ class Handler(
                 self.acp.set_session_permission_mode(self.debug_session_id, "auto")
             parts.append(f"debug={self.debug_session_id}")
         print(f"[Bot] sessions: {' '.join(parts)}")
+        await self._init_dual_dispatcher()
+
+    async def _init_dual_dispatcher(self) -> None:
+        graph_cfg = self.cfg.get("graph") or {}
+        if not bool(graph_cfg.get("enabled", False)):
+            self._dual_dispatcher = None
+            return
+        try:
+            from langgraph_v2.adapters import UnifiedDecideLLM
+            from langgraph_v2.contracts import ACPSessionPool
+            from langgraph_v2.dispatcher import DualPathDispatcher
+            from langgraph_v2.graph import GraphDeps, build_chat_graph
+
+            llm = UnifiedDecideLLM(
+                acp=self.acp,
+                session_id=self.unified_session_id,
+                retry_count=int(
+                    (self.cfg.get("opencode") or {}).get("structured_retry_count", 3) or 3
+                ),
+            )
+            sessions = ACPSessionPool(
+                unified=self.unified_session_id,
+                todo=self.todo_session_id,
+                record=self.record_session_id,
+                remind=self.remind_session_id,
+                agent=self.agent_session_id,
+                debug=self.debug_session_id,
+            )
+            deps = GraphDeps(
+                llm=llm,
+                image_llm=None,
+                classifier=None,
+                vault=self,  # Adapter methods on Handler
+                todo=self,   # Adapter methods on Handler
+                sessions=sessions,
+                acl=None,
+            )
+            graph = build_chat_graph(deps)
+            self._dual_dispatcher = DualPathDispatcher(graph=graph, config=self.cfg)
+            log_flow_event(stage="graph", route="dual_dispatcher_ready", user_text="")
+        except Exception as e:
+            self._dual_dispatcher = None
+            log_flow_event(
+                stage="graph",
+                route="dual_dispatcher_init_failed",
+                user_text="",
+                extra={"error": str(e)[:200]},
+            )
+
+    # ── LangGraph v2 repository adapter methods ──
+
+    async def append_record(self, *, text: str, category: str, event_date: str) -> str:
+        from utils.log_sync import append_to_markdown_section, get_log_path
+        from utils.time_utils import time_str
+        from datetime import datetime as _dt
+
+        v = self.cfg["vault"]
+        dt_obj = None
+        if event_date:
+            try:
+                dt_obj = _dt.strptime(event_date, "%Y-%m-%d")
+            except ValueError:
+                dt_obj = None
+        log_path = get_log_path(v["root"], v["daily_log_dir"], dt_obj)
+        line = f"- [x] {time_str()} {text} （{category or '事务'}）"
+        append_to_markdown_section(log_path, "## 📝 记录", line)
+        return f"已记录 {category or '事务'}：{text}"
+
+    async def append_reminder(self, *, text: str, hhmm: str, event_date: str) -> str:
+        from utils.log_sync import append_to_markdown_section, get_log_path
+        from datetime import datetime as _dt
+
+        v = self.cfg["vault"]
+        dt_obj = None
+        if event_date:
+            try:
+                dt_obj = _dt.strptime(event_date, "%Y-%m-%d")
+            except ValueError:
+                dt_obj = None
+        log_path = get_log_path(v["root"], v["daily_log_dir"], dt_obj)
+        line = f"- [ ] {hhmm}：{text}"
+        append_to_markdown_section(log_path, "## ⏰ 提醒", line)
+        return f"⏰ 已设提醒：{hhmm} {text}"
+
+    async def upsert_timeline_slot(self, *, slot: str, text: str) -> str:
+        from utils.timeline_sync import ensure_timeline_file, slot_at, upsert_timeline_slot
+
+        now = datetime.now()
+        ensure_timeline_file(self.cfg, now)
+        target_slot = slot or slot_at(now)
+        ok = upsert_timeline_slot(self.cfg, target_slot, text, dt=now)
+        if not ok:
+            return "时间轴写入失败。"
+        return f"已追加到时间轴 {target_slot}：{text}"
+
+    async def read_view(self, *, kind: str) -> str:
+        from utils.log_sync import get_log_path
+
+        k = (kind or "").strip().lower()
+        if k == "timeline":
+            tp = timeline_path(self.cfg, datetime.now())
+            if tp.exists():
+                return tp.read_text(encoding="utf-8")[:2000]
+            return "今日时间轴文件还不存在。"
+        v = self.cfg["vault"]
+        lp = get_log_path(v["root"], v["daily_log_dir"])
+        if not lp.exists():
+            return "今日日志文件还不存在。"
+        body = lp.read_text(encoding="utf-8")
+        if k == "record":
+            anchor = "## 📝 记录"
+        elif k == "remind":
+            anchor = "## ⏰ 提醒"
+        else:
+            anchor = "## 📋 待办"
+        idx = body.find(anchor)
+        if idx < 0:
+            return "暂无内容。"
+        tail = body[idx : idx + 2000]
+        return tail
+
+    async def merge(self, *, user_id: str, tasks: list[str]) -> str:
+        cleaned = [str(x).strip() for x in tasks if str(x).strip()]
+        if not cleaned:
+            return "待办内容为空，请重发。"
+        self._todo_queues[user_id] = {"tasks": cleaned, "idx": 0}
+        return f"新增待办 {len(cleaned)} 项"
+
+    async def done_current(self, *, user_id: str) -> tuple[str, str]:
+        cur = self._get_current_queue_task(user_id)
+        decision = {"tool": "todo.done_current", "payload": {}, "reply": ""}
+        await self._apply_unified_decision(decision, user_id, "", user_text="done")
+        nxt = self._get_current_queue_task(user_id)
+        return (f"✅ {cur} 完成" if cur else "当前没有进行中的待办。"), (nxt or "")
+
+    async def next_task(self, *, user_id: str) -> str:
+        return self._get_current_queue_task(user_id)
+
+    async def not_done(self, *, user_id: str) -> str:
+        cur = self._get_current_queue_task(user_id)
+        if cur:
+            return f"先做1分钟版本：{cur}，做好再回我“好了”。"
+        return "没问题，你先发几个待办我来排。"
+
+    async def reorder(self, *, user_id: str, order: list[str]) -> str:
+        self._pending_reorders[user_id] = list(order)
+        return f"我建议顺序：{' -> '.join(order)}。按这个顺序更新吗？"
+
+    async def reorder_confirm(self, *, user_id: str) -> str:
+        order = self._pending_reorders.pop(user_id, [])
+        if not order:
+            return "当前没有待确认的重排建议。"
+        self._todo_queues[user_id] = {"tasks": list(order), "idx": 0}
+        return "已按确认顺序更新。"
+
+    async def skip_current(self, *, user_id: str) -> tuple[str, str]:
+        state = self._todo_queues.get(user_id)
+        if not state:
+            return "当前没有可跳过的待办。", ""
+        tasks = state.get("tasks", [])
+        idx = int(state.get("idx", 0))
+        if idx >= len(tasks):
+            return "当前没有可跳过的待办。", ""
+        cur = tasks.pop(idx)
+        tasks.append(cur)
+        nxt = tasks[idx] if idx < len(tasks) else ""
+        return f"先跳过：{cur}。", nxt
+
+    async def abandon_current(self, *, user_id: str) -> tuple[str, str]:
+        state = self._todo_queues.get(user_id)
+        if not state:
+            return "当前没有可放弃的待办。", ""
+        tasks = state.get("tasks", [])
+        idx = int(state.get("idx", 0))
+        if idx >= len(tasks):
+            return "当前没有可放弃的待办。", ""
+        cur = tasks.pop(idx)
+        if not tasks:
+            self._todo_queues.pop(user_id, None)
+            return f"已放弃：{cur}。当前没有进行中的待办。", ""
+        state["idx"] = min(idx, len(tasks) - 1)
+        nxt = tasks[state["idx"]]
+        return f"已放弃：{cur}。", nxt
 
     def _resolve_acp_session(self, *, prefer_debug: bool = False) -> str:
         """返回当前应使用的 ACP session id。
@@ -1416,7 +1600,19 @@ class Handler(
         print(f"[Bot] <<< {text[:50]}")
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
-            await self._run_chat_routing_pipeline(text, from_user, context_token)
+            async def _legacy_runner() -> None:
+                await self._run_chat_routing_pipeline(text, from_user, context_token)
+
+            if self._dual_dispatcher is not None:
+                await self._dual_dispatcher.dispatch_text(
+                    text=text,
+                    from_user=from_user,
+                    context_token=context_token,
+                    legacy_runner=_legacy_runner,
+                    send_text=self.wx.send_text,
+                )
+            else:
+                await _legacy_runner()
         except Exception as e:
             print(f"[Bot] error: {e}")
             if self.cfg["bot"].get("reply_on_error", True):

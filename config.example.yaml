@@ -99,6 +99,15 @@ bot:
   # 全能力 agent 会话模型（为空则沿用 opencode.model）
   agent_model: ""
 
+# ─── LangGraph v2 灰度 ───
+graph:
+  enabled: false
+  rollout_rate: 0.0
+  rollout_users: []
+  shadow_mode: false
+  shadow_log_dir: ""
+  rollout_stable_bucket: false
+
 # ─── Agent 可靠性 ───
 agent:
   # 跨消息连续自动执行步数上限；超过则强制中断，需人工介入

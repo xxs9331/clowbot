@@ -112,6 +112,38 @@ def collect_config_errors(cfg: dict) -> list[str]:
                 if cmc < 10 or cmc > 200:
                     errors.append("timeline.compact_max_chars must be between 10 and 200 inclusive")
 
+    graph = cfg.get("graph")
+    if graph is not None:
+        if not isinstance(graph, dict):
+            errors.append("graph must be a mapping")
+        else:
+            enabled = graph.get("enabled", False)
+            shadow_mode = graph.get("shadow_mode", False)
+            if not isinstance(enabled, bool):
+                errors.append("graph.enabled must be true or false")
+                enabled = False
+            if not isinstance(shadow_mode, bool):
+                errors.append("graph.shadow_mode must be true or false")
+                shadow_mode = False
+            rate = graph.get("rollout_rate", 0.0)
+            try:
+                rv = float(rate)
+            except (TypeError, ValueError):
+                errors.append("graph.rollout_rate must be a number between 0 and 1")
+                rv = 0.0
+            else:
+                if rv < 0 or rv > 1:
+                    errors.append("graph.rollout_rate must be between 0 and 1")
+            users = graph.get("rollout_users", [])
+            if not isinstance(users, list):
+                errors.append("graph.rollout_users must be a list")
+            if enabled and shadow_mode:
+                shadow_log_dir = str(graph.get("shadow_log_dir") or "").strip()
+                if not shadow_log_dir:
+                    errors.append("graph.shadow_log_dir is required when graph.enabled=true and graph.shadow_mode=true")
+            if not enabled and shadow_mode:
+                errors.append("graph.shadow_mode must be false when graph.enabled=false")
+
     return errors
 
 

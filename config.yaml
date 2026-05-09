@@ -58,3 +58,11 @@ bot:
   wx_agent_allowlist: ["*"]  # 或具体 wxid
   agent_model: ""  # 为空则沿用 opencode.model
   reminder_polish_enabled: true
+
+graph:
+  enabled: false
+  rollout_rate: 0.0
+  rollout_users: []
+  shadow_mode: false
+  shadow_log_dir: "logs/shadow"
+  rollout_stable_bucket: false
