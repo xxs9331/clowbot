@@ -1,197 +1,93 @@
 # Phase 3：节点实现
 
-## 节点优先级
+## 前置：可视化验证拓扑
 
-| 优先级 | 节点 | 复杂度 | 说明 |
-|--------|------|--------|------|
-| P0 | normalize | 低 | 直接迁移，无外部依赖 |
-| P0 | fast_rule | 低 | 规则匹配，纯 Python |
-| P0 | compose | 中 | reply 兜底需精细保留原语义 |
-| P0 | execute | 高 | 接入所有 CoachMixin — 最大工作量 |
-| P1 | commander | 低 | slash 命令路由 |
-| P1 | image_router | 低 | 简单条件判断 |
-| P2 | describe_img | 中 | 需多模态 LLM（当前 deepseek 不支持） |
-| P2 | pre_intent | 中 | 小模型分类 — P3 先 pass-through |
-| P2 | local_view | 中 | 本地 markdown 读取 — P3 先 pass-through |
-| P2 | llm_decide | 高 | structured output + 降级策略 |
+**在写任何节点之前**，先确认 Graph 可编译、拓扑正确。
+
+### visual.py（已就绪）
+
+`langgraph_v2/visual.py` 三种用法：
+
+```bash
+# 1. 输出 Mermaid → 贴到 https://mermaid.live
+python langgraph_v2/visual.py
+
+# 2. 导出 PNG（需要 pip install pyppeteer pillow）
+python langgraph_v2/visual.py --png
+
+# 3. 显式 Mermaid
+python langgraph_v2/visual.py --mermaid
+```
+
+验证清单：
+
+- [x] `python langgraph_v2/visual.py` 无错误退出
+- [ ] 在 mermaid.live 中确认 10 节点 + 3 条件边拓扑正确
+- [ ] `--png` 导出 `docs/clawbot_topology.png`（可选）
 
 ---
 
-## 3.1 normalize
+## 当前状态
 
-```python
-async def normalize(state: ClawBotState) -> dict:
-    text = str(state.get("text") or "").strip()
-    cmd = ""
-    if text.startswith("/"):
-        cmd = text[1:].strip()
-    return {
-        "text": text,
-        "command_kind": cmd,
-        "msg_trace": uuid.uuid4().hex[:12],
-        "handled": False,
-        "queue_snapshot": [],
-        "wx_out": [],
-        "error": "",
-    }
-```
+Phase 1/2 已执行完成。`graph.py` 中 10 个节点均在 **`build_chat_graph` 内联**（无独立 `nodes/*.py`）。下表 **行号仅作快照参考**，以函数名为准。
 
-**源对应**：graph.py 现有 init_context + preprocess 合并为一个节点。
+本 Phase 的职责从「首次实现」变为 **审查 + 对齐现有实现与计划差异**。
 
----
+| 节点 | 状态 | 差异 / 说明 |
+|------|------|-------------|
+| normalize | ✅ | 合并初始化：含 `msg_trace`、`queue_snapshot`、`image_*`、`intent_hint`、`tool_result`、`error`、`agent_mode` 等 |
+| image_router | ✅ pass-through | 条件边：`_route_after_image_router` |
+| pre_intent | ✅ | `deps.classifier` 为 `None` 时跳过；写入 `intent_hint` |
+| describe_img | ✅ | `image_llm is None` 时降级为占位 `text` |
+| commander | ✅ pass-through | 条件边：`_route_after_commander` |
+| local_view | ✅ | 识别 4 种 slash → `vault.read_view`；**未识别**时 `handled=False`，经 `compose` 在 `tool=="none"` 时走统一兜底文案（不静默空回） |
+| fast_rule | ✅ | 规则：`todo.done_current` / `todo.next` / `todo.merge_new_items`（添加待办短语） |
+| llm_decide | ✅ | 简版：单次 `deps.llm.structured_decide` |
+| execute | ✅ | `DomainServices.execute`，**未**走 `_TOOL_HANDLERS` |
+| compose | ✅ | 优先级：`local_reply` > `tool_result` > `decision_reply` > 兜底 |
 
-## 3.2 image_router
+### Tool 数量口径（避免「12 个」歧义）
 
-```python
-def _route_after_image_router(state: ClawBotState) -> str:
-    if state.get("image_base64"):
-        return "describe_img"
-    return "pre_intent"
-```
+- **旧栈**：`register_tool_handler` 共 **11 个可执行 tool**（todo 8 + timeline 1 + record 1 + remind 1）。
+- **LLM schema**（如 `UnifiedDecideLLM._schema`）：enum 共 **12 项 = 11 个 tool + `none`**。
+- **`services.execute` 当前**：仅覆盖其中 **7 个**（`record.add`、`remind.add`、`timeline.append`、`todo.merge_new_items`、`todo.done_current`、`todo.next`，外加 `none` 短路）；缺 `todo.not_done` / `todo.reorder` / `todo.reorder_confirm` / `todo.skip_current` / `todo.abandon_current`。
 
----
+### 与计划的差异需确认
 
-## 3.3 fast_rule
+1. **execute 走 `services.py` 而非 `_TOOL_HANDLERS`**：缺 5 个 todo 类 tool 时 `execute` 返回 `handled=False`、空串，行为与旧 Dispatcher 不一致。补齐方式见下文 **P1 策略**。
 
-无 LLM 快速规则。源对应 `utils.route_fast.build_fast_unified_decision` + graph.py 现有 fast_route。
+2. **llm_decide 简版**：无 combined → decision_only → 全文本降级。`langgraph_v2/adapters/acp_llm.py` 中 **`UnifiedDecideLLM`** 已对齐旧链路——**将 `GraphDeps.llm` 注入为该实现**即可。
 
-```python
-async def fast_rule(state: ClawBotState) -> dict:
-    text = str(state.get("text") or "").lower()
-    # 简单确认
-    if text in ("做完了", "好了", "完成了", "done"):
-        return {"decision": {"tool": "todo.done_current", "payload": {}, "reply": ""}}
-    if text in ("下一个", "next"):
-        return {"decision": {"tool": "todo.next", "payload": {}, "reply": ""}}
-    # 添加待办
-    tasks = _split_tasks(text)
-    if tasks:
-        return {"decision": {"tool": "todo.merge_new_items", "payload": {"tasks": tasks}, "reply": ""}}
-    return {}
-```
+3. **compose 缺 `_sanitize_vague_none_reply`**：需从 `handlers/dispatcher.py` 迁入（或抽共享 util），与单测对齐。
+
+4. **`error` / `agent_mode` / `acl`**（`01-state-graph`）：`normalize` 已带 `agent_mode`；节点侧尚未系统性写 `error`、也未接 `deps.acl`。可与 Phase 4/5 或 Phase 6 验收一并排期。
 
 ---
 
-## 3.4 llm_decide
+## 本 Phase 实际要做的
 
-最复杂的节点之一。调用 adapters/acp_llm.py，处理降级。
+| 优先级 | 任务 | 复杂度 |
+|--------|------|--------|
+| **P0** | 验证 `visual.py` 输出拓扑与 `01-state-graph` 一致 | 低 |
+| **P0** | `GraphDeps.llm` 注入 **`UnifiedDecideLLM`**（降级链路） | 低 |
+| **P0** | `compose` 加 **`_sanitize_vague_none_reply`**（`tool=="none"` 等路径） | 中 |
+| **P1** | **补齐 execute 与旧栈一致的 tool 覆盖**（见下策略） | 高～中 |
+| **P2** | 节点拆到独立 `nodes/*.py`（当前内联可延后） | 低 |
 
-```python
-async def llm_decide(state: ClawBotState, deps: GraphDeps) -> dict:
-    prompt = build_unified_decide_prompt(
-        text=str(state.get("text") or ""),
-        intent_hint=state.get("intent_hint") or {},
-        queue_snapshot=list(state.get("queue_snapshot") or []),
-    )
-    decision = await deps.llm.structured_decide(
-        user_id=str(state.get("from_user") or ""),
-        text=str(state.get("text") or ""),
-        queue_snapshot=list(state.get("queue_snapshot") or []),
-    )
-    return {
-        "decision": {
-            "tool": decision.tool,
-            "payload": decision.payload,
-            "reply": decision.reply,
-        }
-    }
-```
+### P1：execute 补齐策略（二选一，建议顺序）
 
-**降级流程**（与 dispatcher.py 一致）：
-1. 优先 structured_combined（tool+payload+reply）
-2. 失败 -> structured_decision_only + reply 另调
-3. 再失败 -> tool=none 兜底
+| 路线 | 做法 | 优点 | 成本 |
+|------|------|------|------|
+| **A. 扩展 `services.py`** | 为缺 5 个 tool 各写分支，调用 `TodoRepository` / 与现 vault API 对齐 | 不绑 Coach `self`，LangGraph 边界清晰 | 可能与 post-write hooks、Coach 内存状态不完全一致，需逐 tool 对齐文案与副作用 |
+| **B. 接入 `_TOOL_HANDLERS`** | 与 `DispatcherMixin._apply_unified_decision` 共用注册表 | 行为与线上一致 | 需解决 **handler 绑定的 mixin 实例**、生命周期与 `run_post_write_hooks`，工程量更大 |
+
+**建议**：短期走 **A** 尽快覆盖 11 个 tool；中期再评估 **B** 统一执行内核。
 
 ---
-
-## 3.5 execute
-
-全图最重的节点。对应 `DispatcherMixin._apply_unified_decision`（160 行），拆三步：
-
-```python
-async def execute(state: ClawBotState, deps: GraphDeps) -> dict:
-    decision = state.get("decision") or {}
-    tool = str(decision.get("tool") or "none")
-    payload = decision.get("payload") or {}
-
-    # tool=none 直接跳过，不调 coach
-    if tool == "none":
-        return {"handled": False, "tool_result": ""}
-
-    # 1. tool dispatch — 复用现有 TOOL_HANDLERS 注册表
-    from handlers.dispatcher import _TOOL_HANDLERS
-    handler = _TOOL_HANDLERS.get(tool)
-    if handler is None:
-        return {"handled": False, "tool_result": ""}
-
-    # 2. 执行 + slow hint（3s 竞速，与旧版一致）
-    try:
-        handled = await handler_with_slow_hint(...)
-    except Exception as e:
-        return {"handled": True, "tool_result": str(e)[:500], "error": str(e)}
-
-    # 3. post hooks
-    if handled:
-        run_post_write_hooks(handler_ref, tool, payload)
-
-    return {"handled": handled, "tool_result": decision.get("reply", "")}
-```
-
-**关键原则**：不重写 CoachMixin。所有 tool dispatch 走现有 `_TOOL_HANDLERS` 注册表。
-
----
-
-## 3.6 compose
-
-reply 拼装 + 兜底。保留旧版 `_sanitize_vague_none_reply` 语义（空指代检测、假执行标记检测）。
-
-```python
-async def compose(state: ClawBotState) -> dict:
-    reply = str(state.get("tool_result") or state.get("decision", {}).get("reply", "") or "").strip()
-    if not reply:
-        reply = "我没看懂这条要怎么记。要我把它当作生活记录写进今日日志吗？"
-    # 空指代检测
-    reply = sanitize_vague_none_reply(reply)
-    return {"reply": reply, "wx_out": [reply]}
-```
-
----
-
-## 3.7 各节点数据流
-
-```
-normalize ->        text, command_kind, msg_trace
-image_router ->     (text 流) | (image 流)
-describe_img ->     +decision={tool:"record.add", payload:{text:描述}}
-pre_intent ->       +intent_hint
-commander ->        (command_kind 非空路由) | (空路由)
-fast_rule ->        +decision（命中） | {}（未命中）
-llm_decide ->       +decision
-execute ->          +tool_result, +handled
-compose ->          reply, wx_out
-```
-
----
-
-## 文件改动
-
-| 文件 | 动作 |
-|------|------|
-| nodes/__init__.py | 新建 |
-| nodes/normalize.py | 新建 |
-| nodes/image_router.py | 新建 |
-| nodes/describe_img.py | 新建（stub） |
-| nodes/pre_intent.py | 新建（pass-through stub） |
-| nodes/commander.py | 新建 |
-| nodes/fast_rule.py | 新建 |
-| nodes/local_view.py | 新建（pass-through stub） |
-| nodes/llm_decide.py | 新建 |
-| nodes/execute.py | 新建 |
-| nodes/compose.py | 新建 |
-| graph.py | 扩展节点注册 + edges |
 
 ## 验收
 
-- [ ] 5 条主链路：记录/待办/提醒/快通道/闲聊
-- [ ] execute 正确路由到 _TOOL_HANDLERS
-- [ ] compose 兜底文案不低于旧版质量
+- [ ] `python langgraph_v2/visual.py` 输出与 mermaid.live 渲染一致
+- [ ] `UnifiedDecideLLM` 降级链路验证（combined → decision_only → 全文本兜底）
+- [ ] `compose` 空指代处理不差于旧版（对照 `test_dispatcher` / `test_opencode_client` 中与 `_sanitize_vague_none_reply` 相关的用例）
+- [ ] `execute`：**11 个可执行 tool** 均有明确路径且与旧栈语义可比；`none` 仍短路（与 schema 12 项含 `none` 一致）

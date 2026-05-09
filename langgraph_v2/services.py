@@ -59,5 +59,26 @@ class DomainServices:
             if nxt:
                 return True, f"你现在先做：{nxt}"
             return True, "当前没有进行中的短待办。"
+        if tool == "todo.not_done":
+            return True, await self.todo.not_done(user_id=user_id)
+        if tool == "todo.reorder":
+            order = payload.get("reorder")
+            if not isinstance(order, list):
+                return True, "顺序建议我收到了，但还不能安全改队列，请你再确认一次。"
+            cleaned = [str(x).strip() for x in order if str(x).strip()]
+            if not cleaned:
+                return True, "顺序建议我收到了，但还不能安全改队列，请你再确认一次。"
+            return True, await self.todo.reorder(user_id=user_id, order=cleaned)
+        if tool == "todo.reorder_confirm":
+            return True, await self.todo.reorder_confirm(user_id=user_id)
+        if tool == "todo.skip_current":
+            msg, nxt = await self.todo.skip_current(user_id=user_id)
+            if nxt:
+                return True, f"{msg}\n现在先做：{nxt}，做完了吗？"
+            return True, msg
+        if tool == "todo.abandon_current":
+            msg, nxt = await self.todo.abandon_current(user_id=user_id)
+            if nxt:
+                return True, f"{msg}\n下一个：{nxt}"
+            return True, msg
         return False, ""
-

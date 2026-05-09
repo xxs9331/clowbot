@@ -54,6 +54,21 @@ class TodoRepository(Protocol):
     async def next_task(self, *, user_id: str) -> str:
         ...
 
+    async def not_done(self, *, user_id: str) -> str:
+        ...
+
+    async def reorder(self, *, user_id: str, order: list[str]) -> str:
+        ...
+
+    async def reorder_confirm(self, *, user_id: str) -> str:
+        ...
+
+    async def skip_current(self, *, user_id: str) -> tuple[str, str]:
+        ...
+
+    async def abandon_current(self, *, user_id: str) -> tuple[str, str]:
+        ...
+
 
 @dataclass(frozen=True)
 class ACPSessionPool:

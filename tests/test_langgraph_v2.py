@@ -44,6 +44,7 @@ class _FakeVault:
 class _FakeTodo:
     def __init__(self):
         self.tasks: dict[str, list[str]] = {}
+        self.pending_reorder: dict[str, list[str]] = {}
 
     async def merge(self, *, user_id: str, tasks: list[str]) -> str:
         self.tasks.setdefault(user_id, []).extend(tasks)
@@ -60,6 +61,40 @@ class _FakeTodo:
     async def next_task(self, *, user_id: str) -> str:
         items = self.tasks.get(user_id) or []
         return items[0] if items else ""
+
+    async def not_done(self, *, user_id: str) -> str:
+        cur = await self.next_task(user_id=user_id)
+        if cur:
+            return f"先做1分钟版本：{cur}，做好再回我“好了”。"
+        return "没问题，你先发几个待办我来排。"
+
+    async def reorder(self, *, user_id: str, order: list[str]) -> str:
+        self.pending_reorder[user_id] = list(order)
+        return f"我建议顺序：{' -> '.join(order)}。按这个顺序更新吗？"
+
+    async def reorder_confirm(self, *, user_id: str) -> str:
+        order = self.pending_reorder.pop(user_id, [])
+        if not order:
+            return "当前没有待确认的重排建议。"
+        self.tasks[user_id] = list(order)
+        return "已按确认顺序更新。"
+
+    async def skip_current(self, *, user_id: str) -> tuple[str, str]:
+        items = self.tasks.get(user_id) or []
+        if not items:
+            return "当前没有可跳过的待办。", ""
+        cur = items.pop(0)
+        items.append(cur)
+        return f"先跳过：{cur}。", (items[0] if items else "")
+
+    async def abandon_current(self, *, user_id: str) -> tuple[str, str]:
+        items = self.tasks.get(user_id) or []
+        if not items:
+            return "当前没有可放弃的待办。", ""
+        cur = items.pop(0)
+        if items:
+            return f"已放弃：{cur}。", items[0]
+        return f"已放弃：{cur}。当前没有进行中的待办。", ""
 
 
 class _FakeImageLLM:
