@@ -11,6 +11,7 @@ import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from config import PACKAGE_ROOT
 from utils.flow_log import log_flow_event
 from utils.log_sync import get_log_path
 from utils.timeline_state import (
@@ -29,6 +30,86 @@ from utils.timeline_sync import (
     timeline_enabled,
     timeline_path,
 )
+
+
+PROMPTS_DIR = PACKAGE_ROOT / "prompts"
+_CHECKIN_FILE = "checkin.md"
+
+# ── 默认模板（fallback，与 checkin.md 内容保持同步） ──────────────────────
+
+_DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checkin」话术。
+输出契约：只输出 1 行中文微信消息，30～80 字为宜；不要 markdown；不要 JSON。
+场景：用户在 {slot} 这个时间点已有记录（{slot_preview}），请简要概括并附 1 条推进建议（可点名下一步拖延项，但不要人身攻击）。
+语气要像是在轻轻确认，不是在催填空 — 该格已有内容，不需要用户回复即可。
+若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加请以「追加」开头写一句正文。
+不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。
+
+当前时间：{time}
+检查的时间节点：{slot}
+该格已有内容：{slot_body}
+时间轴最近一条非空：{last_timeline_line}
+
+【时间轴节选】
+{timeline_tail}
+
+【日记节选】
+{diary_tail}
+
+【生活日志节选】
+{life_log_tail}
+
+【项目总览节选】
+{projects_tail}
+
+请直接输出该行消息：
+
+（补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）
+
+---
+
+你是中文个人助理，负责「半小时状态 checkin」话术。
+输出契约：只输出 1 行中文微信消息，30～80 字为宜；不要 markdown；不要 JSON。
+场景：用户在 {slot} 这个时间点还没有记录，请温和询问「你在 {slot} 这个时间点在做什么」，并给 1 条可执行小建议（可点名拖延项，但不要人身攻击）。
+不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。
+
+当前时间：{time}
+检查的时间节点：{slot}
+时间轴最近一条非空：{last_timeline_line}
+
+【时间轴节选】
+{timeline_tail}
+
+【日记节选】
+{diary_tail}
+
+【生活日志节选】
+{life_log_tail}
+
+【项目总览节选】
+{projects_tail}
+
+请直接输出该行消息：
+
+（补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）"""
+
+
+def _load_checkin_prompts() -> tuple[str, str]:
+    """从 checkin.md 读取联合模板，按 --- 拆分返回 (filled, empty)。
+
+    每次调用都重新读取文件，确保热更新。
+    文件缺失/读取失败/拆分异常 → 返回内嵌默认值。
+    """
+    path = PROMPTS_DIR / _CHECKIN_FILE
+    try:
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            parts = content.split("\n---\n", 1)
+            if len(parts) == 2:
+                return parts[0].strip(), parts[1].strip()
+    except OSError:
+        pass
+    parts = _DEFAULT_CHECKIN.split("\n---\n", 1)
+    return parts[0].strip(), parts[1].strip()
 
 
 def _ceil_to_next_half_hour(dt: datetime) -> datetime:
@@ -112,26 +193,17 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
     max_len = int(bot_cfg.get("max_reply_length") or 2000)
 
     slot_preview = slot_body[:400] + ("…" if len(slot_body) > 400 else "")
-    prompt = (
-        "你是中文个人助理，负责「半小时状态 checkin」话术。\n"
-        "输出契约：只输出 1 行中文微信消息，30～80 字为宜；不要 markdown；不要 JSON。\n"
-        f"场景：用户在 {slot} 这个时间点已有记录（{slot_preview}），"
-        "请简要概括并附 1 条推进建议（可点名下一步拖延项，但不要人身攻击）。\n"
-        "语气要像是在轻轻确认，不是在催填空 — 该格已有内容，不需要用户回复即可。\n"
-        "若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加请以「追加」开头写一句正文。\n"
-        "不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。\n\n"
-        f"当前时间：{ctx['time']}\n"
-        f"检查的时间节点：{ctx['slot_checked']}\n"
-        f"该格已有内容：{ctx['slot_body']}\n"
-        f"时间轴最近一条非空：{ctx['last_timeline_line']}\n\n"
-        f"【时间轴节选】\n{ctx['timeline_tail']}\n\n"
-        f"【日记节选】\n{ctx['diary_tail']}\n\n"
-        f"【生活日志节选】\n{ctx['life_log_tail']}\n\n"
-        f"【项目总览节选】\n{ctx['projects_tail']}\n\n"
-        "请直接输出该行消息："
-        "\n\n（补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，"
-        "那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。"
-        "如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）"
+    filled_tmpl, _ = _load_checkin_prompts()
+    prompt = filled_tmpl.format(
+        time=ctx["time"],
+        slot=ctx["slot_checked"],
+        slot_body=ctx["slot_body"],
+        slot_preview=slot_preview,
+        last_timeline_line=ctx["last_timeline_line"],
+        timeline_tail=ctx["timeline_tail"],
+        diary_tail=ctx["diary_tail"],
+        life_log_tail=ctx["life_log_tail"],
+        projects_tail=ctx["projects_tail"],
     )
 
     sid = getattr(handler, "unified_session_id", "") or getattr(handler, "session_id", "")
@@ -209,23 +281,15 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
     bot_cfg = cfg.get("bot") or {}
     max_len = int(bot_cfg.get("max_reply_length") or 2000)
 
-    prompt = (
-        "你是中文个人助理，负责「半小时状态 checkin」话术。\n"
-        "输出契约：只输出 1 行中文微信消息，30～80 字为宜；不要 markdown；不要 JSON。\n"
-        f"场景：用户在 {slot} 这个时间点还没有记录，"
-        f"请温和询问「你在 {slot} 这个时间点在做什么」，并给 1 条可执行小建议（可点名拖延项，但不要人身攻击）。\n"
-        "不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。\n\n"
-        f"当前时间：{ctx['time']}\n"
-        f"检查的时间节点：{ctx['slot_checked']}\n"
-        f"时间轴最近一条非空：{ctx['last_timeline_line']}\n\n"
-        f"【时间轴节选】\n{ctx['timeline_tail']}\n\n"
-        f"【日记节选】\n{ctx['diary_tail']}\n\n"
-        f"【生活日志节选】\n{ctx['life_log_tail']}\n\n"
-        f"【项目总览节选】\n{ctx['projects_tail']}\n\n"
-        "请直接输出该行消息："
-        "\n\n（补充说明：你稍后可能会收到用户回复。如果回复是简短的活动描述如「打游戏」「洗澡」「到实验室了」，"
-        "那很可能是在回你刚才的 checkin 提问，请通过 unified 决策将内容写入时间轴对应格并回复确认。"
-        "如果回复是长句、提问、表情、或明显在继续之前的聊天话题，请不要写入时间轴，正常回复即可。）"
+    _, empty_tmpl = _load_checkin_prompts()
+    prompt = empty_tmpl.format(
+        time=ctx["time"],
+        slot=ctx["slot_checked"],
+        last_timeline_line=ctx["last_timeline_line"],
+        timeline_tail=ctx["timeline_tail"],
+        diary_tail=ctx["diary_tail"],
+        life_log_tail=ctx["life_log_tail"],
+        projects_tail=ctx["projects_tail"],
     )
 
     sid = getattr(handler, "unified_session_id", "") or getattr(handler, "session_id", "")

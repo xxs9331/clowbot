@@ -16,6 +16,7 @@ from contextlib import suppress
 from typing import Any, Awaitable, Callable
 
 from acp.opencode_client import OpenCodeACP
+from config import PACKAGE_ROOT
 from utils.flow_log import log_flow_event
 from utils.refresh_hooks import run_post_write_hooks
 from utils.tool_names import (
@@ -38,6 +39,69 @@ from utils.tool_names import (
 # legacy 文本 JSON 解析仍失败时，若原文含「{」（多半在尝试输出 JSON），则将全文作为 reply 兜底，避免用户侧空白。
 # 16K 字符量级：明显长于常见微信单条，又避免极端超长占用内存/日志。
 UNIFIED_LEGACY_RAW_FALLBACK_MAX_CHARS = 16384
+
+PROMPTS_DIR = PACKAGE_ROOT / "prompts"
+_UNIFIED_DECIDE_FILE = "unified_decide.md"
+
+_DEFAULT_UNIFIED_DECIDE = """{hint_block}你是微信个人助手。请在同一轮输出里同时完成：动作决策（tool+payload）与发给用户的中文 reply（微信里自然、简短即可）。
+根对象只能包含 tool、payload、reply 三个键；禁止其它键。
+reply：须至少一句可见中文；换行写成 \\\\n；禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；若使用「刚才/前面/刚列过」等指代，必须附上关键原文片段，禁止空指代；tool 非 none 时可附带一句简短确认。
+
+{tool_hint}{rules}{context_block}
+
+---
+
+{hint_block}你是微信个人助手。请只做动作决策，不生成给用户的话术。
+根对象只能包含 tool、payload 两个键；禁止出现 reply、message、content 等任何其它键，即使用户在闲聊、角色扮演也不要在本轮输出里写回复正文。
+你必须仅输出一个 JSON 对象，字段只有 tool 与 payload。
+
+{tool_hint}{rules}{context_block}
+
+---
+
+你是微信个人助手。根据用户原话回复 1～3 句自然、简短中文。
+硬约束：
+- 禁止用「等着我去翻」「我去查查」「快了快了」「别催」等假装正在查询、拖延交付的话术。
+- 若用户在要具体事实、清单、记忆/日记/记录内容，而你这里没有引用任何材料，应直接说明自己本轮拿不到日记正文，可请用户发「查看记录」或「找一下最近的三条记忆」这类话触发系统自动读取；不要承诺代查或演「正在翻」。
+- 纯闲聊、问你在做什么、吐槽等，正常接话即可。
+不要 JSON，不要解释，不要 markdown。
+
+用户原话：{user_text}
+回复：
+
+--
+
+你是微信个人助手。动作已被系统接管执行，请输出一句简短确认文案。
+不要 JSON，不要解释，不要 markdown。
+
+用户原话：{user_text}
+已执行动作：tool={tool}, payload={payload_json}
+回复："""
+
+
+def _load_unified_decide_prompts() -> tuple[str, str, str, str]:
+    """从 unified_decide.md 读取联合模板，按 --- 拆分返回 4 段:
+    (structured_combined, structured_decision_only, reply_none, reply_action)
+
+    每次调用都重新读取，确保热更新。缺失/异常 → fallback 默认值。
+    """
+    path = PROMPTS_DIR / _UNIFIED_DECIDE_FILE
+    try:
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            parts = content.split("\n---\n", 2)
+            if len(parts) == 3:
+                reply_parts = parts[2].strip().split("\n--\n", 1)
+                reply_none = reply_parts[0].strip() if reply_parts else parts[2].strip()
+                reply_action = reply_parts[1].strip() if len(reply_parts) > 1 else reply_none
+                return parts[0].strip(), parts[1].strip(), reply_none, reply_action
+    except OSError:
+        pass
+    parts = _DEFAULT_UNIFIED_DECIDE.split("\n---\n", 2)
+    reply_parts = parts[2].strip().split("\n--\n", 1)
+    reply_none = reply_parts[0].strip() if reply_parts else parts[2].strip()
+    reply_action = reply_parts[1].strip() if len(reply_parts) > 1 else reply_none
+    return parts[0].strip(), parts[1].strip(), reply_none, reply_action
 
 # 跟进时间短句（如「中午一点吧」）：含时间词且整体较短则暴露 remind.add，无需跨轮状态。
 _CANDIDATE_TIME_HINT_RE = re.compile(
@@ -457,18 +521,12 @@ class DispatcherMixin:
             user_id, text, intent_hint=intent_hint
         )
         rules = self._unified_decide_tool_payload_reply_rules_block()
-        prompt = (
-            f"{hint_block}"
-            "你是微信个人助手。请在同一轮输出里同时完成：动作决策（tool+payload）"
-            "与发给用户的中文 reply（微信里自然、简短即可）。\n"
-            "根对象只能包含 tool、payload、reply 三个键；禁止其它键。\n"
-            "reply：须至少一句可见中文；换行写成 \\\\n；"
-            "禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；"
-            "若使用「刚才/前面/刚列过」等指代，必须附上关键原文片段，禁止空指代；"
-            "tool 非 none 时可附带一句简短确认。\n\n"
-            f"{tool_hint}"
-            f"{rules}"
-            f"{context_block}"
+        tmpl, _, _, _ = _load_unified_decide_prompts()
+        prompt = tmpl.format(
+            hint_block=hint_block,
+            tool_hint=tool_hint,
+            rules=rules,
+            context_block=context_block,
         )
         op_cfg = self.cfg.get("opencode", {}) or {}
         retry_count = int(op_cfg.get("structured_retry_count", 3) or 3)
@@ -493,15 +551,12 @@ class DispatcherMixin:
             user_id, text, intent_hint=intent_hint
         )
         rules = self._unified_decide_tool_payload_reply_rules_block()
-        prompt = (
-            f"{hint_block}"
-            "你是微信个人助手。请只做动作决策，不生成给用户的话术。\n"
-            "根对象只能包含 tool、payload 两个键；禁止出现 reply、message、content 等任何其它键，"
-            "即使用户在闲聊、角色扮演也不要在本轮输出里写回复正文。\n"
-            "你必须仅输出一个 JSON 对象，字段只有 tool 与 payload。\n"
-            f"{tool_hint}"
-            f"{rules}"
-            f"{context_block}"
+        _, tmpl, _, _ = _load_unified_decide_prompts()
+        prompt = tmpl.format(
+            hint_block=hint_block,
+            tool_hint=tool_hint,
+            rules=rules,
+            context_block=context_block,
         )
         op_cfg = self.cfg.get("opencode", {}) or {}
         retry_count = int(op_cfg.get("structured_retry_count", 3) or 3)
@@ -521,26 +576,14 @@ class DispatcherMixin:
         tool: str,
         payload: dict[str, Any],
     ) -> str:
+        _, _, reply_none_tmpl, reply_action_tmpl = _load_unified_decide_prompts()
         if tool == TOOL_DECISION_NONE:
-            prompt = (
-                "你是微信个人助手。根据用户原话回复 1～3 句自然、简短中文。\n"
-                "硬约束：\n"
-                "- 禁止用「等着我去翻」「我去查查」「快了快了」「别催」等假装正在查询、拖延交付的话术。\n"
-                "- 若用户在要具体事实、清单、记忆/日记/记录内容，而你这里没有引用任何材料，"
-                "应直接说明自己本轮拿不到日记正文，可请用户发「查看记录」或「找一下最近的三条记忆」"
-                "这类话触发系统自动读取；不要承诺代查或演「正在翻」。\n"
-                "- 纯闲聊、问你在做什么、吐槽等，正常接话即可。\n"
-                "不要 JSON，不要解释，不要 markdown。\n"
-                f"用户原话：{user_text}\n"
-                "回复："
-            )
+            prompt = reply_none_tmpl.format(user_text=user_text)
         else:
-            prompt = (
-                "你是微信个人助手。动作已被系统接管执行，请输出一句简短确认文案。\n"
-                "不要 JSON，不要解释，不要 markdown。\n"
-                f"用户原话：{user_text}\n"
-                f"已执行动作：tool={tool}, payload={json.dumps(payload, ensure_ascii=False)}\n"
-                "回复："
+            prompt = reply_action_tmpl.format(
+                user_text=user_text,
+                tool=tool,
+                payload_json=json.dumps(payload, ensure_ascii=False),
             )
         reply, _ = await self.acp.prompt(
             self.unified_session_id, prompt, trace_tag="unified_reply"

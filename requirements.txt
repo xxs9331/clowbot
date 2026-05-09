@@ -13,3 +13,6 @@ cryptography>=41.0.0
 
 # Windows service (service.py)
 pywin32>=306
+
+# LangGraph v2 (parallel pipeline)
+langgraph>=0.2.0
