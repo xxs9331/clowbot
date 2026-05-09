@@ -93,19 +93,37 @@ class UnifiedDecideLLM:
             "- reply: 给用户的自然中文短句（仅 combined 模式需要）\n"
         )
 
-    def _build_combined_prompt(self, *, text: str, queue_snapshot: list[str]) -> str:
+    @staticmethod
+    def _build_hint_block(intent_hint: dict[str, Any] | None) -> str:
+        if not isinstance(intent_hint, dict) or not intent_hint:
+            return ""
+        return "- intent_hint_json: " + json.dumps(intent_hint, ensure_ascii=False) + "\n"
+
+    def _build_combined_prompt(
+        self,
+        *,
+        text: str,
+        queue_snapshot: list[str],
+        intent_hint: dict[str, Any] | None,
+    ) -> str:
         combined, _, _, _ = _load_unified_decide_prompts()
         return combined.format(
-            hint_block="",
+            hint_block=self._build_hint_block(intent_hint),
             tool_hint="",
             rules=self._rules_block(),
             context_block=self._build_context_block(text, queue_snapshot),
         )
 
-    def _build_decision_only_prompt(self, *, text: str, queue_snapshot: list[str]) -> str:
+    def _build_decision_only_prompt(
+        self,
+        *,
+        text: str,
+        queue_snapshot: list[str],
+        intent_hint: dict[str, Any] | None,
+    ) -> str:
         _, decision_only, _, _ = _load_unified_decide_prompts()
         return decision_only.format(
-            hint_block="",
+            hint_block=self._build_hint_block(intent_hint),
             tool_hint="",
             rules=self._rules_block(),
             context_block=self._build_context_block(text, queue_snapshot),
@@ -146,10 +164,19 @@ class UnifiedDecideLLM:
             return {}
 
     async def structured_decide(
-        self, *, user_id: str, text: str, queue_snapshot: list[str]
+        self,
+        *,
+        user_id: str,
+        text: str,
+        queue_snapshot: list[str],
+        intent_hint: dict[str, Any] | None = None,
     ) -> Decision:
         _ = user_id
-        combined_prompt = self._build_combined_prompt(text=text, queue_snapshot=queue_snapshot)
+        combined_prompt = self._build_combined_prompt(
+            text=text,
+            queue_snapshot=queue_snapshot,
+            intent_hint=intent_hint,
+        )
         combined = await self._transport.prompt_structured(
             prompt=combined_prompt,
             schema=self._schema(include_reply=True),
@@ -162,7 +189,9 @@ class UnifiedDecideLLM:
             return Decision(tool=tool, payload=payload, reply=reply)
 
         decision_prompt = self._build_decision_only_prompt(
-            text=text, queue_snapshot=queue_snapshot
+            text=text,
+            queue_snapshot=queue_snapshot,
+            intent_hint=intent_hint,
         )
         decision_only = await self._transport.prompt_structured(
             prompt=decision_prompt,
@@ -190,4 +219,3 @@ class UnifiedDecideLLM:
         obj = self._extract_json_object(raw_reply or "")
         tool, payload, reply = _coalesce_unified_decision(obj if isinstance(obj, dict) else {})
         return Decision(tool=tool, payload=payload, reply=reply)
-

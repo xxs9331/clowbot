@@ -13,7 +13,12 @@ class Decision:
 
 class LLMProvider(Protocol):
     async def structured_decide(
-        self, *, user_id: str, text: str, queue_snapshot: list[str]
+        self,
+        *,
+        user_id: str,
+        text: str,
+        queue_snapshot: list[str],
+        intent_hint: dict[str, Any] | None = None,
     ) -> Decision:
         ...
 

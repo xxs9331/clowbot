@@ -110,3 +110,21 @@ def test_unified_decide_decision_only_spill_for_none():
     assert out.reply == "这是 spill"
     assert not acp.prompt_calls
 
+
+def test_unified_decide_includes_intent_hint_block():
+    acp = _FakeACP()
+    acp.structured_results = [{"tool": "none", "payload": {}, "reply": "ok"}]
+    llm = UnifiedDecideLLM(acp=acp, session_id="sid-u", retry_count=2)
+    out = _run(
+        llm.structured_decide(
+            user_id="u1",
+            text="加个待办：喝水",
+            queue_snapshot=[],
+            intent_hint={"intent": "todo_add", "confidence": 0.9},
+        )
+    )
+    assert out.tool == "none"
+    assert acp.structured_calls
+    msg = acp.structured_calls[0]["message"]
+    assert "intent_hint_json" in msg
+    assert "todo_add" in msg

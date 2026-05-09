@@ -13,9 +13,18 @@ class _FakeLLM:
     def __init__(self, decision: Decision):
         self.decision = decision
         self.calls = 0
+        self.last_intent_hint: dict | None = None
 
-    async def structured_decide(self, *, user_id: str, text: str, queue_snapshot: list[str]) -> Decision:
+    async def structured_decide(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        queue_snapshot: list[str],
+        intent_hint: dict | None = None,
+    ) -> Decision:
         self.calls += 1
+        self.last_intent_hint = intent_hint
         return self.decision
 
 
@@ -162,6 +171,7 @@ def test_llm_record_add_path():
     out = _run(app.ainvoke({"text": "今早体重72kg", "from_user": "u2", "context_token": "ctx"}))
     assert llm.calls == 1
     assert cls.calls == 1
+    assert llm.last_intent_hint == {"intent": "record", "score": 0.8}
     assert vault.records == [("今早体重 72kg", "身体", "2026-05-09")]
     assert "已记录 身体" in out["wx_out"][0]
 
@@ -202,6 +212,25 @@ def test_none_reply_fallback():
     out = _run(app.ainvoke({"text": "asdfghjkl", "from_user": "u4", "context_token": "ctx"}))
     assert llm.calls == 1
     assert "我没看懂这条要怎么记" in out["wx_out"][0]
+
+
+def test_slash_log_alias_path():
+    llm = _FakeLLM(Decision(tool="none", payload={}, reply="不会被调用"))
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=None,
+            vault=vault,
+            todo=todo,
+        )
+    )
+
+    out = _run(app.ainvoke({"text": "/查看日志", "from_user": "u6", "context_token": "ctx"}))
+    assert llm.calls == 0
+    assert out["wx_out"] == ["VIEW::log"]
 
 
 def test_image_path_smoke():

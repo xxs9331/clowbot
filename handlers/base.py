@@ -874,7 +874,7 @@ class Handler(
             self._dual_dispatcher = None
             return
         try:
-            from langgraph_v2.adapters import UnifiedDecideLLM
+            from langgraph_v2.adapters import FlashIntentClassifier, UnifiedDecideLLM
             from langgraph_v2.contracts import ACPSessionPool
             from langgraph_v2.dispatcher import DualPathDispatcher
             from langgraph_v2.graph import GraphDeps, build_chat_graph
@@ -885,6 +885,12 @@ class Handler(
                 retry_count=int(
                     (self.cfg.get("opencode") or {}).get("structured_retry_count", 3) or 3
                 ),
+            )
+            oc_cfg = self.cfg.get("opencode") or {}
+            classifier = FlashIntentClassifier(
+                acp=self.acp,
+                model=(oc_cfg.get("intent_model") or None),
+                timeout=float(oc_cfg.get("intent_timeout_sec", 5.0) or 5.0),
             )
             sessions = ACPSessionPool(
                 unified=self.unified_session_id,
@@ -897,7 +903,7 @@ class Handler(
             deps = GraphDeps(
                 llm=llm,
                 image_llm=None,
-                classifier=None,
+                classifier=classifier,
                 vault=self,  # Adapter methods on Handler
                 todo=self,   # Adapter methods on Handler
                 sessions=sessions,
@@ -975,6 +981,8 @@ class Handler(
         if not lp.exists():
             return "今日日志文件还不存在。"
         body = lp.read_text(encoding="utf-8")
+        if k in ("log", "brief", "record_recent"):
+            return self._compose_local_view_body(k, body)
         if k == "record":
             anchor = "## 📝 记录"
         elif k == "remind":

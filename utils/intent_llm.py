@@ -117,27 +117,7 @@ def _build_turn_prompt(
     mem_block = f"\n{mem}\n" if mem else ""
     context_block = f"队列状态: {json.dumps(queue, ensure_ascii=False)}\n{mem_block}"
     _, turn = _load_intent_classify_prompts()
-    return turn.format(context_block=context_block, user_text=text)
-
-
-def _build_turn_prompt(
-    text: str,
-    queue_state: dict | None,
-    memory_context: str | None = None,
-) -> str:
-    """分类回合短 prompt：避免每轮重复注入长规则。"""
-    queue = queue_state or {"active": False}
-    mem = (memory_context or "").strip()
-    mem_block = f"\n{mem}\n" if mem else ""
-    return (
-        "按你已加载的分类规则执行本轮判断。\n"
-        "仅输出紧凑 JSON：{\"intent\":\"...\",\"slots\":{},\"confidence\":0.0}\n"
-        "\n"
-        f"队列状态: {json.dumps(queue, ensure_ascii=False)}\n"
-        f"{mem_block}"
-        f"用户消息: {text}\n"
-        "JSON:"
-    )
+    return turn.replace("{context_block}", context_block).replace("{user_text}", text)
 
 
 def _build_prompt(
