@@ -59,19 +59,19 @@ START -> normalize -> image_router
                          /        \
                     text           image
                     /                \
-              pre_intent        describe_img
-                   |                  |
-              commander           fast_rule
+               commander        describe_img
                /      \           /      \
             cmd     no cmd     hit       miss
              |         |        |          |
-        local_view     |    execute    llm_decide
+        local_view  fast_rule execute  pre_intent
              |         |        |          |
-        compose ------+        |      execute
-                                |          |
-                                +----+-----+
-                                     |
-                                  compose -> END
+        compose      hit/miss    |      llm_decide
+                       /  \      |          |
+                  execute  pre_intent ------+
+                      |         |
+                      +----+----+
+                           |
+                        compose -> END
 ```
 
 ### 旧图 → 新图（节点名对照）
@@ -89,14 +89,14 @@ START -> normalize -> image_router
 
 | 分流点 | True 条件 | True -> | False -> |
 |--------|-----------|---------|----------|
-| image_router | `image_base64` 经规范化后非空（建议：`.strip()` 后判空；禁止仅空白串走图片支路） | describe_img | pre_intent |
+| image_router | `image_base64` 经规范化后非空（建议：`.strip()` 后判空；禁止仅空白串走图片支路） | describe_img | commander |
 | commander | `command_kind` 非空（与现 `preprocess` 一致：`/` 后为整段 strip） | local_view | fast_rule |
-| fast_rule | `decision` 非空（**仅表示本节点刚命中规则**） | execute | llm_decide |
+| fast_rule | `decision` 非空（**仅表示本节点刚命中规则**） | execute | pre_intent |
 
 ### 路由约定
 
 - **`commander` → `local_view`**：`local_view` 若未识别具体子命令，应 **不** 擅自写入最终 `reply` 误导用户；可置 `handled=False` 并清空/忽略无效 `command_kind`，由 `compose` 统一兜底，或后续迭代为回到 `fast_rule`（若采用第二种，需在 Phase 3 节点实现里显式加边，本拓扑默认「local_view 总能落到 compose」）。
-- **`fast_rule` 后的条件边**：进入该分流前，**只有 `fast_rule` 应写入 `decision`**。`pre_intent` 只写 `intent_hint`，避免与「规则命中」语义冲突。
+- **`fast_rule` 后的条件边**：进入该分流前，**只有 `fast_rule` 应写入 `decision`**。`pre_intent` 只写 `intent_hint`，并在未命中规则时进入 `llm_decide`。
 
 ## 1.4 GraphDeps 扩展
 

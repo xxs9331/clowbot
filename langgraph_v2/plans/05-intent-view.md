@@ -1,5 +1,7 @@
 # Phase 5：pre_intent + local_view 对齐与增强
 
+> **请以 [05-pre-intent-local.md](05-pre-intent-local.md) 为主**：节奏约束、`fast_rule` 前置拓扑、与 `FlashIntentClassifier` 的差异及验收均在该文维护。本文保留早期「双意图源 / hint 闭环」讨论供参考。
+
 ## 现状（与文档同步）
 
 Phase 3 已落地 **`langgraph_v2/nodes/`** 模块，`graph.py` 已挂载：

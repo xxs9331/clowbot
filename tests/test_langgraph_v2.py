@@ -147,6 +147,29 @@ def test_fast_route_done_current():
     assert "下一个" in out["wx_out"][0]
 
 
+def test_fast_route_done_current_skips_pre_intent():
+    llm = _FakeLLM(Decision(tool="none", payload={}, reply=""))
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    todo.tasks["u1"] = ["任务A", "任务B"]
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+
+    out = _run(app.ainvoke({"text": "做完了", "from_user": "u1", "context_token": "ctx"}))
+    assert llm.calls == 0
+    assert cls.calls == 0
+    assert out["wx_out"]
+    assert "下一个" in out["wx_out"][0]
+
+
 def test_llm_record_add_path():
     llm = _FakeLLM(
         Decision(
@@ -267,3 +290,77 @@ def test_image_path_smoke():
     assert llm.calls == 1
     assert vault.records
     assert "已记录" in out["wx_out"][0]
+
+
+def test_fast_route_todo_merge_items_skips_llm_and_classifier():
+    llm = _FakeLLM(Decision(tool="none", payload={}, reply=""))
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+    out = _run(
+        app.ainvoke(
+            {"text": "添加待办：买牛奶，写报告", "from_user": "u7", "context_token": "ctx"}
+        )
+    )
+    assert llm.calls == 0
+    assert cls.calls == 0
+    assert todo.tasks.get("u7") == ["买牛奶", "写报告"]
+    assert "新增待办 2 项" in out["wx_out"][0]
+
+
+def test_remind_path_goes_pre_intent_then_llm_decide():
+    llm = _FakeLLM(
+        Decision(
+            tool="remind.add",
+            payload={"text": "开会", "hhmm": "08:00", "event_date": "2026-05-10"},
+            reply="",
+        )
+    )
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+    out = _run(
+        app.ainvoke({"text": "明天8点提醒我开会", "from_user": "u8", "context_token": "ctx"})
+    )
+    assert llm.calls == 1
+    assert cls.calls == 1
+    assert vault.reminders == [("开会", "08:00", "2026-05-10")]
+    assert "已设提醒" in out["wx_out"][0]
+
+
+def test_none_chat_path_uses_llm_reply_and_calls_classifier():
+    llm = _FakeLLM(Decision(tool="none", payload={}, reply="今天辛苦了，先休息一下。"))
+    vault = _FakeVault()
+    todo = _FakeTodo()
+    cls = _FakeClassifier()
+    app = build_chat_graph(
+        GraphDeps(
+            llm=llm,
+            image_llm=None,
+            classifier=cls,
+            vault=vault,
+            todo=todo,
+        )
+    )
+    out = _run(app.ainvoke({"text": "今天好累", "from_user": "u9", "context_token": "ctx"}))
+    assert llm.calls == 1
+    assert cls.calls == 1
+    assert out["wx_out"] == ["今天辛苦了，先休息一下。"]

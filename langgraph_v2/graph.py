@@ -75,9 +75,8 @@ def build_chat_graph(deps: GraphDeps):
     graph.add_conditional_edges(
         "image_router",
         route_after_image_router,
-        {"describe_img": "describe_img", "pre_intent": "pre_intent"},
+        {"describe_img": "describe_img", "pre_intent": "commander"},
     )
-    graph.add_edge("pre_intent", "commander")
     graph.add_edge("describe_img", "fast_rule")
     graph.add_conditional_edges(
         "commander",
@@ -88,8 +87,9 @@ def build_chat_graph(deps: GraphDeps):
     graph.add_conditional_edges(
         "fast_rule",
         route_after_fast_rule,
-        {"execute": "execute", "llm_decide": "llm_decide"},
+        {"execute": "execute", "llm_decide": "pre_intent"},
     )
+    graph.add_edge("pre_intent", "llm_decide")
     graph.add_edge("llm_decide", "execute")
     graph.add_edge("execute", "compose")
     graph.add_edge("compose", END)

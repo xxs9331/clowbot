@@ -8,7 +8,8 @@ def _split_tasks(text: str) -> list[str]:
     for prefix in ("添加待办:", "待办:", "todo:"):
         if raw.startswith(prefix):
             body = raw[len(prefix) :]
-            return [x.strip() for x in body.replace("、", ",").split(",") if x.strip()]
+            body = body.replace("、", ",").replace("，", ",")
+            return [x.strip() for x in body.split(",") if x.strip()]
     return []
 
 
@@ -35,4 +36,3 @@ def route_after_fast_rule(state: ClawBotState) -> str:
     if state.get("decision"):
         return "execute"
     return "llm_decide"
-

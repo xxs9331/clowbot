@@ -8,7 +8,8 @@
 | [02-contracts-llm.md](02-contracts-llm.md) | 2 | Contracts 扩展 + ACP LLM 适配 | ⏳ |
 | [03-nodes.md](03-nodes.md) | 3 | 节点实现（normalize ~ llm_decide） | ⏳ |
 | [04-adapter-gray.md](04-adapter-gray.md) | 4 | DualPathDispatcher + 灰度开关 | ⏳ |
-| [05-intent-view.md](05-intent-view.md) | 5 | pre_intent + local_view 补齐 | ⏳ |
+| [05-pre-intent-local.md](05-pre-intent-local.md) | 5 | pre_intent + local_view + 节奏/拓扑（**主文档**） | ⏳ |
+| [05-intent-view.md](05-intent-view.md) | 5 | 早期稿，实施以 05-pre-intent-local 为准 | ⏳ |
 | [06-testing.md](06-testing.md) | 6 | 测试 + 回退机制 | ⏳ |
 
 ## 不变更清单
