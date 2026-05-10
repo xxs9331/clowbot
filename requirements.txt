@@ -6,6 +6,7 @@ aiohttp>=3.9.0
 
 # Config
 pyyaml>=6.0
+python-dotenv>=1.0.0
 
 # Utilities
 python-dateutil>=2.8.0
@@ -16,4 +17,5 @@ pywin32>=306
 
 # LangGraph v2 (parallel pipeline)
 langgraph>=0.2.0
+# LangSmith Studio / langgraph dev (local only): pip install -U "langgraph-cli[inmem]"
 json-repair>=0.41.0

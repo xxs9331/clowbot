@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from handlers.dispatcher import DispatcherMixin
 from utils.flow_log import log_flow_event
 
 from ..state import ClawBotState
@@ -31,6 +30,8 @@ async def compose(state: ClawBotState) -> ClawBotState:
     if tool_result:
         return {"reply": tool_result, "wx_out": [tool_result]}
     if tool == "none":
+        from handlers.dispatcher import DispatcherMixin  # 延迟导入，避免 langgraph dev 仅装 CLI 时拉取 wechat/aiohttp
+
         reply = decision_reply or "收到。"
         reply = DispatcherMixin._sanitize_vague_none_reply(reply, tool, structured_trace=None)
         return {"reply": reply, "wx_out": [reply]}

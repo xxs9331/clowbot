@@ -1,7 +1,7 @@
-"""琐事池：每日将 8 件事随机洗牌成固定顺序，checkin 按序各提醒一次；用完后注入小说/游戏类休闲提示。
+"""琐事池：每次 checkin 从 8 件事中随机抽一类注入话术；不保证当天每件都点到。
 
 状态仅持久化到 chore_pool_state.json（路径规则与 timeline state_dir 一致）。
-不跟踪用户是否「完成」某事，亦无 post_write 自动划掉。
+``reminders`` 仅作审计（slot → 当时抽中的琐事）；不跟踪用户是否完成。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# ── 8 件琐事（顺序仅用于校验；每日 order 为洗牌结果）──────────────────────
+# ── 8 件琐事（每次随机其一）────────────────────────────────────────────
 CHORE_POOL: list[str] = [
     "吃药",
     "接水",
@@ -24,16 +24,38 @@ CHORE_POOL: list[str] = [
     "上药",
 ]
 
-_LEISURE_HINTS: tuple[str, ...] = (
-    "今日 8 件琐事已在各半格 checkin 里各点名过一次。话术里可穿插一句：放松一下看会儿小说（轻松、无压力即可）。",
-    "今日琐事顺序已轮完一轮。话术里可轻提一句：玩会儿游戏换换脑也可以～",
-)
-
 # ── 状态文件路径 ──────────────────────────────────────────────────────
 _STATE_FILE = "chore_pool_state.json"
 _BOT_ROOT = Path(__file__).resolve().parent.parent  # .clawbot/
+_CHORE_HINT_PROMPT = _BOT_ROOT / "prompts" / "chore_hint.md"
+
+# 与 prompts/chore_hint.md 同步；文件缺失或 format 失败时回退
+_DEFAULT_CHORE_HINT_TMPL = (
+    "琐事提示（每次从 {pool_size} 件中随机其一）："
+    "本次可在话术里自然带上「{pick}」。其余事项在后续 checkin 仍可能被抽到。"
+)
 
 _mode_lock: dict[str, Any] = {}
+
+
+def _load_chore_hint_template() -> str:
+    """每次调用重新读文件，与 checkin.md 等一致，便于热更新。"""
+    try:
+        if _CHORE_HINT_PROMPT.is_file():
+            t = _CHORE_HINT_PROMPT.read_text(encoding="utf-8", errors="replace").strip()
+            if t:
+                return t
+    except OSError:
+        pass
+    return _DEFAULT_CHORE_HINT_TMPL
+
+
+def _render_chore_hint(pick: str, *, pool_size: int) -> str:
+    tmpl = _load_chore_hint_template()
+    try:
+        return tmpl.format(pick=pick, pool_size=pool_size)
+    except (KeyError, ValueError):
+        return _DEFAULT_CHORE_HINT_TMPL.format(pick=pick, pool_size=pool_size)
 
 
 def _state_path(cfg: dict) -> Path:
@@ -50,6 +72,21 @@ def _state_path(cfg: dict) -> Path:
     return (root / rel_norm / _STATE_FILE).resolve()
 
 
+def _normalize_reminders(raw_rm: Any) -> list[dict]:
+    reminders: list[dict] = []
+    if not isinstance(raw_rm, list):
+        return reminders
+    for x in raw_rm:
+        if isinstance(x, dict) and str(x.get("chore") or "").strip():
+            reminders.append(
+                {
+                    "slot": str(x.get("slot") or ""),
+                    "chore": str(x.get("chore") or "").strip(),
+                }
+            )
+    return reminders
+
+
 def _read_state(cfg: dict) -> dict:
     p = _state_path(cfg)
     if not p.exists():
@@ -58,15 +95,11 @@ def _read_state(cfg: dict) -> dict:
         raw = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             return {}
-        o = raw.get("order")
-        if (
-            isinstance(o, list)
-            and len(o) == len(CHORE_POOL)
-            and sorted(str(x) for x in o) == sorted(CHORE_POOL)
-        ):
-            return raw
-        # 旧版仅有 completed/last_suggested，或 order 损坏：视为无状态，由 _ensure_today_state 洗牌重建
-        return {}
+        date = str(raw.get("date") or "").strip()
+        if not date:
+            return {}
+        reminders = _normalize_reminders(raw.get("reminders"))
+        return {"date": date, "reminders": reminders}
     except Exception:
         return {}
 
@@ -87,21 +120,11 @@ def _write_state(cfg: dict, data: dict) -> None:
 
 
 def _state_valid_for_today(st: dict, today: str) -> bool:
-    if st.get("date") != today:
-        return False
-    o = st.get("order")
-    if not isinstance(o, list) or len(o) != len(CHORE_POOL):
-        return False
-    try:
-        return sorted(str(x) for x in o) == sorted(CHORE_POOL)
-    except TypeError:
-        return False
+    return isinstance(st.get("date"), str) and st.get("date") == today
 
 
 def _bootstrap_today(cfg: dict, today: str) -> dict:
-    order = list(CHORE_POOL)
-    random.shuffle(order)
-    st = {"date": today, "order": order, "cursor": 0, "reminders": []}
+    st = {"date": today, "reminders": []}
     _write_state(cfg, st)
     return st
 
@@ -111,26 +134,16 @@ def _ensure_today_state(cfg: dict) -> dict:
     st = _read_state(cfg)
     if not _state_valid_for_today(st, today):
         return _bootstrap_today(cfg, today)
-    cursor = max(0, min(int(st.get("cursor") or 0), len(CHORE_POOL)))
-    raw_rm = st.get("reminders") or []
-    reminders: list[dict] = []
-    if isinstance(raw_rm, list):
-        for x in raw_rm:
-            if isinstance(x, dict) and str(x.get("chore") or "").strip():
-                reminders.append(
-                    {
-                        "slot": str(x.get("slot") or ""),
-                        "chore": str(x.get("chore") or "").strip(),
-                    }
-                )
-    canonical = {
-        "date": st["date"],
-        "order": list(st["order"]),
-        "cursor": cursor,
-        "reminders": reminders,
-    }
-    if "completed" in st or "last_suggested" in st:
-        _write_state(cfg, canonical)
+    canonical = {"date": st["date"], "reminders": list(st.get("reminders") or [])}
+    # 旧版含 order/cursor：落盘时去掉，避免误导
+    p = _state_path(cfg)
+    if p.exists():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and ("order" in raw or "cursor" in raw):
+                _write_state(cfg, canonical)
+        except Exception:
+            pass
     return canonical
 
 
@@ -138,36 +151,18 @@ def _ensure_today_state(cfg: dict) -> dict:
 
 
 def get_chore_hint(cfg: dict, *, slot: str = "") -> str:
-    """返回注入 checkin prompt 的琐事/休闲提示文本。
+    """返回注入 checkin prompt 的琐事提示文本。
 
-    - 当日首次调用会洗牌并写入 ``order``；之后每次消费下一件，直至 8 件用完。
-    - ``slot`` 非空时向 ``reminders`` 追加一条记录（仅审计）。
+    每次调用从 ``CHORE_POOL`` 均匀随机抽一项；``slot`` 非空时向 ``reminders`` 追加一条（审计）。
     """
     st = _ensure_today_state(cfg)
-    cursor = int(st.get("cursor") or 0)
-    order: list[str] = list(st["order"])
-
-    if cursor >= len(CHORE_POOL):
-        return random.choice(_LEISURE_HINTS)
-
-    pick = order[cursor]
+    pick = random.choice(CHORE_POOL)
     reminders = list(st.get("reminders") or [])
     sl = str(slot or "").strip()
     if sl:
         reminders.append({"slot": sl, "chore": pick})
 
-    next_cursor = cursor + 1
-    st_out = {
-        "date": st["date"],
-        "order": order,
-        "cursor": next_cursor,
-        "reminders": reminders,
-    }
+    st_out = {"date": st["date"], "reminders": reminders}
     _write_state(cfg, st_out)
 
-    rest = order[next_cursor:] if next_cursor < len(CHORE_POOL) else []
-    rest_s = "、".join(rest) if rest else "无"
-    return (
-        f"琐事提示（按日随机顺序，每件当天只提醒一次）：当前第 {cursor + 1}/{len(CHORE_POOL)} 件，"
-        f"可在话术里自然带上「{pick}」。尚未点到的还有：{rest_s}。"
-    )
+    return _render_chore_hint(pick, pool_size=len(CHORE_POOL))

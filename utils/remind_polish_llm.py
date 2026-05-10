@@ -21,6 +21,32 @@ _REMIND_POLISH_SESSION_PRIMED_ATTR = "_remind_polish_session_primed"
 PROMPTS_DIR = PACKAGE_ROOT / "prompts"
 _REMIND_POLISH_FILE = "remind_polish.md"
 
+
+def _collapse_body_whitespace(s: str) -> str:
+    """与 finalize_reminder_text 一致：首尾空白去掉，任意空白 run 压成单空格。"""
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def finalize_reminder_text(prefix: str, body: str, max_total: int) -> str:
+    """拼接前缀与正文；正文先规范化空白；超长时只截断正文，前缀始终完整保留。"""
+    body_norm = _collapse_body_whitespace(body or "")
+    combined = prefix + body_norm
+    if len(combined) <= max_total:
+        return combined
+    room = max(0, max_total - len(prefix))
+    return prefix + body_norm[:room]
+
+
+def _normalize_body(reply: str) -> str:
+    """模型返回润色句：去围栏、压成单行、规范化空白；无效则空串。"""
+    t = (reply or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"^```(?:[^\n`]*)\n?", "", t)
+    t = re.sub(r"\n?```\s*$", "", t)
+    return _collapse_body_whitespace(t)
+
+
 _DEFAULT_REMIND_POLISH = """你是中文生活助手，专门把「定时提醒」的推送正文写得更自然、温暖一点，每次语气可以略有变化，但不要夸张、不要鸡汤长文。
 
 输出契约（必须遵守）：

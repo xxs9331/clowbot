@@ -24,3 +24,5 @@ Thumbs.db
 .DS_Store
 chore_pool_state.json
 timeline_checkin_state.json
+.venv-langgraph*
+.langgraph*

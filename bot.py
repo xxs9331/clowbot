@@ -15,6 +15,23 @@ iLink 协议参考：
 3. 不需要公网 IP，纯 fetch 实现
 """
 
+from pathlib import Path
+
+
+def _load_dotenv() -> None:
+    """Load `.clawbot/.env` so Windows 服务与前台调试都能读到 LANGSMITH_* 等变量。"""
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(env_path, override=False)
+
+
+_load_dotenv()
+
 import asyncio
 from contextlib import suppress
 

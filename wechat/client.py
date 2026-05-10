@@ -10,6 +10,31 @@ import aiohttp
 
 from config import PACKAGE_ROOT
 
+
+def normalize_wechat_outbound_text(text: str) -> str:
+    """整理出站文案，减轻微信会话里换行/字面量 ``\\n`` 显示异常。
+
+    - 真实 ``\\r\\n`` / ``\\r`` 先规范为 ``\\n``。
+    - 模型常输出字面量反斜杠+n（两字符），改为换行后再处理。
+    - 微信单条气泡往往不按换行排版，多行合并为 `` · `` 分隔的单段（空行丢弃）。
+    """
+    if not isinstance(text, str):
+        return ""
+    if not text:
+        return text
+    s = text.replace("\r\n", "\n").replace("\r", "\n")
+    # 字面量转义序列（长度优先：\\r\\n 先于 \\n）
+    s = s.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    s = s.replace("\\t", " ")
+    parts = [p.strip() for p in s.split("\n")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return " · ".join(parts)
+
+
 #
 # 微信 ClawBot 基于 iLink Bot API (ilinkai.weixin.qq.com)
 # 接入方式：
@@ -378,6 +403,7 @@ class ClawBotClient:
 
         参考 golembot weixin.ts：msg 包含 from_user_id, client_id, message_type=2, message_state=2
         """
+        text = normalize_wechat_outbound_text(text or "")
         # 微信单条消息限制约2000字符，分段发送
         chunks = [text[i : i + 1800] for i in range(0, len(text), 1800)]
         results = []
