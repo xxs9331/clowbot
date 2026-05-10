@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from utils.flow_log import log_flow_event
+from utils.llm_reply_unescape import unescape_llm_visible_newlines
 
 from ..state import ClawBotState
 
@@ -34,8 +35,10 @@ async def compose(state: ClawBotState) -> ClawBotState:
 
         reply = decision_reply or "收到。"
         reply = DispatcherMixin._sanitize_vague_none_reply(reply, tool, structured_trace=None)
+        reply = unescape_llm_visible_newlines(reply)
         return {"reply": reply, "wx_out": [reply]}
     if decision_reply:
-        return {"reply": decision_reply, "wx_out": [decision_reply]}
-    fallback = "处理完成。"
+        dr = unescape_llm_visible_newlines(decision_reply)
+        return {"reply": dr, "wx_out": [dr]}
+    fallback = unescape_llm_visible_newlines("处理完成。")
     return {"reply": fallback, "wx_out": [fallback]}

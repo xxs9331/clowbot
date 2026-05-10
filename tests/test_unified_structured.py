@@ -25,7 +25,9 @@ class _FakeACP:
     async def prompt_structured(self, *args, **kwargs):
         return self.structured
 
-    async def prompt(self, sid, msg, *, trace_tag="x"):
+    async def prompt(
+        self, sid, msg, *, trace_tag="x", session_context=None, prompt_extra=None, **kwargs
+    ):
         self.prompt_calls.append(trace_tag)
         if self.raise_on_reply and trace_tag == "unified_reply":
             raise RuntimeError("reply boom")
@@ -48,7 +50,9 @@ class _FakeACPCombinedFailsThenDecisionOnly:
             return None
         return {"tool": TOOL_DECISION_NONE, "payload": {}}
 
-    async def prompt(self, sid, msg, *, trace_tag="x"):
+    async def prompt(
+        self, sid, msg, *, trace_tag="x", session_context=None, prompt_extra=None, **kwargs
+    ):
         self.prompt_calls.append(trace_tag)
         if self.raise_on_reply and trace_tag == "unified_reply":
             raise RuntimeError("reply boom")
@@ -87,7 +91,7 @@ def test_prompt_structured_retry_until_valid():
         ]
     )
 
-    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x", prompt_extra=None, **kwargs):
         return next(replies)
 
     acp.prompt = _stub_prompt  # type: ignore[method-assign]
@@ -147,7 +151,7 @@ def test_unified_combined_includes_reply_skips_second_llm():
     acp = OpenCodeACP()
     trace_tags: list[str] = []
 
-    async def _stub_prompt(_sid, _msg, *, trace_tag="x"):
+    async def _stub_prompt(_sid, _msg, *, trace_tag="x", prompt_extra=None, **kwargs):
         trace_tags.append(trace_tag)
         return '{"tool":"none","payload":{},"reply":"只要这一枪"}', ""
 

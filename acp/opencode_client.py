@@ -22,6 +22,7 @@ from collections import deque
 from typing import Any, Awaitable, Optional, Callable
 
 from utils.flow_log import log_acp_turn, log_flow_event
+from utils.llm_reply_unescape import unescape_llm_visible_newlines
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 MULTIMODAL_MODEL = "opencode-go/mimo-v2-omni"
@@ -1232,6 +1233,10 @@ class OpenCodeACP:
                     if p.get("type") == "text":
                         all_text.append(p.get("text", ""))
 
+        # 流式分片必须 "".join：用空格拼接会把模型输出的换行变成空格（症状类似
+        # 「Markdown 丢换行」）。若将来把同一段正文经 EventSource 下发，正文里的 \n
+        # 还可能与 SSE 的 data: …\n\n 帧边界冲突，需在传输层用占位符编解码
+        # （见 utils.sse_newline）。
         return {
             "text": "".join(all_text).strip(),
             "reasoning": "".join(all_reasoning).strip(),
@@ -1461,7 +1466,7 @@ class OpenCodeACP:
                 merged, reply_src = self._merge_structured_final_reply(
                     fr0, best_effort, tool_s
                 )
-                out["reply"] = merged
+                out["reply"] = unescape_llm_visible_newlines(merged)
             spill_final = (spill_text or "").strip()
             if not has_reply_field and tool_s == "none" and best_effort.strip():
                 if self._structured_informativeness(best_effort) > self._structured_informativeness(
@@ -1469,7 +1474,9 @@ class OpenCodeACP:
                 ):
                     spill_final = best_effort.strip()
             if spill_final:
-                out[self.STRUCTURED_DECISION_SPILL_REPLY_KEY] = spill_final
+                out[self.STRUCTURED_DECISION_SPILL_REPLY_KEY] = unescape_llm_visible_newlines(
+                    spill_final
+                )
             trace = {
                 "structured_attempts": attempt_idx,
                 "best_effort_reply_len": len((best_effort or "").strip()),

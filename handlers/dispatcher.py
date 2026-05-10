@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 from acp.opencode_client import OpenCodeACP
 from config import PACKAGE_ROOT
 from utils.flow_log import log_flow_event
+from utils.llm_reply_unescape import unescape_llm_visible_newlines
 from utils.refresh_hooks import run_post_write_hooks
 from utils.tool_names import (
     LEGACY_TOOL_ALIASES,  # noqa: F401  导入便于重导出
@@ -45,7 +46,7 @@ _UNIFIED_DECIDE_FILE = "unified_decide.md"
 
 _DEFAULT_UNIFIED_DECIDE = """{hint_block}你是微信个人助手。请在同一轮输出里同时完成：动作决策（tool+payload）与发给用户的中文 reply（微信里自然、简短即可）。
 根对象只能包含 tool、payload、reply 三个键；禁止其它键。
-reply：须至少一句可见中文；换行写成 \\\\n；禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；若使用「刚才/前面/刚列过」等指代，必须附上关键原文片段，禁止空指代；tool 非 none 时可附带一句简短确认。
+reply：须至少一句可见中文；多行时在 JSON 的 reply 字符串内只使用标准 JSON 换行转义（一个 \\ 加字母 n）；禁止双重转义（不要写成两个 \\ 再跟 n，否则微信仍显示字面量 \\n）；禁止用「等着我去翻」「快了快了」等假装正在查日记的话术；若使用「刚才/前面/刚列过」等指代，必须附上关键原文片段，禁止空指代；tool 非 none 时可附带一句简短确认。
 
 {tool_hint}{rules}{context_block}
 
@@ -64,6 +65,7 @@ reply：须至少一句可见中文；换行写成 \\\\n；禁止用「等着我
 - 禁止用「等着我去翻」「我去查查」「快了快了」「别催」等假装正在查询、拖延交付的话术。
 - 若用户在要具体事实、清单、记忆/日记/记录内容，而你这里没有引用任何材料，应直接说明自己本轮拿不到日记正文，可请用户发「查看记录」或「找一下最近的三条记忆」这类话触发系统自动读取；不要承诺代查或演「正在翻」。
 - 纯闲聊、问你在做什么、吐槽等，正常接话即可。
+- 段落之间直接按回车分段，不要输出字面量「反斜杠 + 字母 n」两个字符。
 不要 JSON，不要解释，不要 markdown。
 
 用户原话：{user_text}
@@ -141,7 +143,9 @@ def _coalesce_unified_decision(decision: dict) -> tuple[str, dict[str, Any], str
         r = decision.get("reorder")
         if isinstance(r, list):
             payload["reorder"] = r
-    reply = str(decision.get("reply", "") or "").strip()
+    reply = unescape_llm_visible_newlines(
+        str(decision.get("reply", "") or "").strip()
+    )
     return tool, payload, reply
 
 
@@ -320,7 +324,7 @@ class DispatcherMixin:
             "输出格式硬约束（必须全部满足）：\n"
             "1) 仅输出 1 行 JSON，对象根节点必须包含 tool、payload、reply 三个键\n"
             "2) 使用双引号，不要单引号，不要注释，不要 markdown，不要代码块\n"
-            "3) reply 必须是 JSON 字符串；若需要换行，必须写成 \\\\n，禁止直接写真实换行\n"
+            "3) reply 必须是 JSON 字符串；换行使用标准 JSON 转义（\\\\n 在 JSON 文本里表现为反斜杠+n 一对）；禁止双重反斜杠；禁止用未转义的真实换行打断整段 JSON\n"
             "4) 若不确定，输出 {\"tool\":\"none\",\"payload\":{},\"reply\":\"\"}\n"
             "5) 严禁在 JSON 前后输出任何说明文字\n"
             "请严格按这个骨架输出："
@@ -588,7 +592,7 @@ class DispatcherMixin:
         reply, _ = await self.acp.prompt(
             self.unified_session_id, prompt, trace_tag="unified_reply"
         )
-        return (reply or "").strip()
+        return unescape_llm_visible_newlines((reply or "").strip())
 
     async def _llm_unified_decide(
         self,
