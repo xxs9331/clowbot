@@ -35,6 +35,7 @@ timeline:
   append_separator: "|"
   checkin_enabled: true
   project_overview_path: "1-Projects/项目进度总览.md"
+  checkin_context_path: "3-Resources/记忆库/09-daily-rhythm.md"
   checkin_ai_timeout_sec: 12
   checkin_poll_interval_sec: 0
   write_policy: "whitelist_only"

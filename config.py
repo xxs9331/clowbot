@@ -111,6 +111,18 @@ def collect_config_errors(cfg: dict) -> list[str]:
             else:
                 if cmc < 10 or cmc > 200:
                     errors.append("timeline.compact_max_chars must be between 10 and 200 inclusive")
+        ccp = tl.get("checkin_context_path", None)
+        if ccp is not None and ccp != "":
+            if not isinstance(ccp, str):
+                errors.append("timeline.checkin_context_path must be a string or omitted/empty")
+            else:
+                raw = ccp.strip()
+                if raw:
+                    p = Path(raw.replace("\\", "/"))
+                    if p.is_absolute():
+                        errors.append("timeline.checkin_context_path must be relative to vault.root")
+                    elif ".." in p.parts:
+                        errors.append("timeline.checkin_context_path must not contain '..'")
 
     graph = cfg.get("graph")
     if graph is not None:

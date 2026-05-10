@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from config import collect_config_errors
 
 from tests.helpers import minimal_timeline, minimal_vault
@@ -92,6 +94,43 @@ def test_collect_errors_compact_enabled_type():
         "timeline": {**minimal_timeline("/x"), "compact_enabled": "yes"},
     }
     assert any("compact_enabled" in e for e in collect_config_errors(cfg))
+
+
+def test_collect_errors_checkin_context_path_type():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_context_path": 123},
+    }
+    errs = collect_config_errors(cfg)
+    assert any("checkin_context_path" in e for e in errs)
+
+
+def test_collect_errors_checkin_context_path_absolute():
+    abs_path = str(Path.home() / "checkin_context_absolute_test_marker.md")
+    assert Path(abs_path).is_absolute()
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_context_path": abs_path},
+    }
+    errs = collect_config_errors(cfg)
+    assert any("relative to vault.root" in e for e in errs)
+
+
+def test_collect_errors_checkin_context_path_dotdot():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_context_path": "a/../../x.md"},
+    }
+    errs = collect_config_errors(cfg)
+    assert any(".." in e for e in errs)
+
+
+def test_collect_errors_checkin_context_path_ok_relative():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_context_path": "3-Resources/记忆库/09.md"},
+    }
+    assert collect_config_errors(cfg) == []
 
 
 def test_collect_errors_graph_rollout_range():

@@ -54,6 +54,8 @@ timeline:
   checkin_enabled: false
   # checkin 读项目压力（相对 vault.root）
   project_overview_path: "1-Projects/项目进度总览.md"
+  # 可选：checkin 额外读入的「标准作息」等静态笔记（相对 vault.root）；省略或留空则不读
+  # checkin_context_path: "3-Resources/记忆库/09-daily-rhythm.md"
   checkin_ai_timeout_sec: 12
   # 0 或未写：对齐整点/半点；>0 时每 N 秒轮询一次（调试用，如 300=5 分钟；最小 10）
   checkin_poll_interval_sec: 0

@@ -44,6 +44,7 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 语气要像是在轻轻确认，不是在催填空 — 该格已有内容，不需要用户回复即可。
 若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加请以「追加」开头写一句正文。
 不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。
+可结合下方「标准作息摘要」对照当前时间点给轻量建议；若该节为空则忽略。若有摘要，勿断言用户此刻一定在做其中某一步。
 
 当前时间：{time}
 检查的时间节点：{slot}
@@ -62,6 +63,9 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 【项目总览节选】
 {projects_tail}
 
+【标准作息摘要】
+{rhythm_tail}
+
 【琐事池状态】
 {chore_hint}
 
@@ -75,6 +79,7 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 输出契约：只输出 1 行中文微信消息，30～80 字为宜；不要 markdown；不要 JSON。
 场景：用户在 {slot} 这个时间点还没有记录，请温和询问「你在 {slot} 这个时间点在做什么」，并给 1 条可执行小建议（可点名拖延项，但不要人身攻击）。
 不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。
+可结合下方「标准作息摘要」对照当前时间点给轻量建议；若该节为空则忽略。若有摘要，勿断言用户此刻一定在做其中某一步。
 
 当前时间：{time}
 检查的时间节点：{slot}
@@ -91,6 +96,9 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 
 【项目总览节选】
 {projects_tail}
+
+【标准作息摘要】
+{rhythm_tail}
 
 【琐事池状态】
 {chore_hint}
@@ -174,6 +182,32 @@ def _diary_path(handler, today: datetime) -> Path:
     return root / rel.replace("\\", "/") / y / m / f"{d}.md"
 
 
+_RHYTHM_TAIL_MAX_CHARS = 1500
+
+
+def _resolved_checkin_context_path(handler) -> Path | None:
+    """``timeline.checkin_context_path``：相对 vault.root；非法或越界则视为未配置。"""
+    tl = handler.cfg.get("timeline") or {}
+    rel = str(tl.get("checkin_context_path") or "").strip()
+    if not rel:
+        return None
+    v = handler.cfg.get("vault") or {}
+    root = Path(str(v.get("root") or "").strip()).resolve()
+    try:
+        p = (root / rel.replace("\\", "/")).resolve()
+        p.relative_to(root)
+    except (ValueError, OSError):
+        return None
+    return p
+
+
+def _rhythm_tail(handler) -> str:
+    p = _resolved_checkin_context_path(handler)
+    if p is None:
+        return ""
+    return _snip_file(p, _RHYTHM_TAIL_MAX_CHARS)
+
+
 async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str: str) -> str:
     """已填格概括推送：告知当前格已有内容，用户可不回复。"""
     cfg = handler.cfg
@@ -195,6 +229,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         "diary_tail": _snip_file(diary, 2000),
         "life_log_tail": _snip_file(life, 2000),
         "projects_tail": _snip_file(overview, 1200),
+        "rhythm_tail": _rhythm_tail(handler),
         "chore_hint": get_chore_hint(cfg, slot=slot),
     }
     bot_cfg = cfg.get("bot") or {}
@@ -212,6 +247,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         diary_tail=ctx["diary_tail"],
         life_log_tail=ctx["life_log_tail"],
         projects_tail=ctx["projects_tail"],
+        rhythm_tail=ctx["rhythm_tail"],
         chore_hint=ctx["chore_hint"],
     )
 
@@ -286,6 +322,7 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         "diary_tail": _snip_file(diary, 2000),
         "life_log_tail": _snip_file(life, 2000),
         "projects_tail": _snip_file(overview, 1200),
+        "rhythm_tail": _rhythm_tail(handler),
         "chore_hint": get_chore_hint(cfg, slot=slot),
     }
     bot_cfg = cfg.get("bot") or {}
@@ -300,6 +337,7 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         diary_tail=ctx["diary_tail"],
         life_log_tail=ctx["life_log_tail"],
         projects_tail=ctx["projects_tail"],
+        rhythm_tail=ctx["rhythm_tail"],
         chore_hint=ctx["chore_hint"],
     )
 
