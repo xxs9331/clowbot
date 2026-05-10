@@ -1,1 +1,0 @@
-{"task": "", "findings_so_far": ["step=5 | task= | collected=1条 | next=待办操作: todo.next", "step=10 | task= | collected=2条 | next=待办操作: todo.not_done"], "collected_data": ["待办推进: todo.next", "待办推进: todo.not_done"], "consecutive_auto_steps": 10}
