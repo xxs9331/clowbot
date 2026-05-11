@@ -57,5 +57,15 @@ async def execute(state: ClawBotState, services: DomainServices) -> ClawBotState
     # LangGraph 不经过 dispatcher：须同样触发 post_write（琐事池、提醒调度 refresh 等）
     if handled and getattr(services.vault, "cfg", None):
         run_post_write_hooks(services.vault, tool, payload)
+    vault = services.vault
+    if handled and getattr(vault, "_eval_mode", False):
+        fn = getattr(vault, "note_eval_tool_execution", None)
+        if callable(fn):
+            decision = state.get("decision") if isinstance(state.get("decision"), dict) else {}
+            fn(
+                tool=tool,
+                payload=payload,
+                reply_preview=str(decision.get("reply") or "")[:240],
+            )
     return {"handled": handled, "tool_result": str(out or "")}
 

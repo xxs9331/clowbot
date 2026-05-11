@@ -56,6 +56,8 @@ timeline:
   project_overview_path: "1-Projects/项目进度总览.md"
   # 可选：checkin 额外读入的「标准作息」等静态笔记（相对 vault.root）；省略或留空则不读
   # checkin_context_path: "3-Resources/记忆库/09-daily-rhythm.md"
+  # checkin prompt 是否注入 Handler 共享对话窗口摘要（与 unified 同源）；默认 true；false 则仅 vault 上下文
+  # checkin_include_chat_history: true
   checkin_ai_timeout_sec: 12
   # 0 或未写：对齐整点/半点；>0 时每 N 秒轮询一次（调试用，如 300=5 分钟；最小 10）
   checkin_poll_interval_sec: 0
@@ -83,6 +85,8 @@ bot:
   reply_on_error: true           # 出错时告知用户
   typing_indicator: true         # 处理中显示"正在输入"
   max_reply_length: 2000         # 回复最大长度（微信限制）
+  # 单窗口统一对话：后台事件注入 + 事件泵（默认关闭，保留旧行为）
+  unified_chat_mode: false
   # 定时提醒推送前可选经大模型润色（独立 ACP session；失败则回退原文）
   reminder_polish_enabled: false
   reminder_polish_timeout_sec: 8
@@ -100,15 +104,6 @@ bot:
   wx_agent_allowlist: []
   # 全能力 agent 会话模型（为空则沿用 opencode.model）
   agent_model: ""
-
-# ─── LangGraph v2 灰度 ───
-graph:
-  enabled: false
-  rollout_rate: 0.0
-  rollout_users: []
-  shadow_mode: false
-  shadow_log_dir: ""
-  rollout_stable_bucket: false
 
 # ─── Agent 可靠性 ───
 agent:

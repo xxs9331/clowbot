@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from acp.opencode_client import OpenCodeACP
 from handlers.dispatcher import _coalesce_unified_decision, _load_unified_decide_prompts
@@ -39,11 +39,15 @@ class UnifiedDecideLLM:
         acp: OpenCodeACP,
         session_id: str,
         retry_count: int = 3,
+        background_summary_provider: Callable[[], str] | None = None,
+        unified_chat_mode_provider: Callable[[], bool] | None = None,
     ):
         self._acp = acp
         self._session_id = session_id
         self._retry_count = int(retry_count or 3)
         self._transport = ACPStructuredLLM(acp, session_id)
+        self._background_summary_provider = background_summary_provider
+        self._unified_chat_mode_provider = unified_chat_mode_provider
 
     @staticmethod
     def _schema(include_reply: bool) -> dict[str, Any]:
@@ -130,7 +134,30 @@ class UnifiedDecideLLM:
             context_block=self._build_context_block(text, queue_snapshot),
         )
 
-    async def _generate_reply(self, *, user_text: str, tool: str, payload: dict[str, Any]) -> str:
+    def _in_unified_chat_mode(self) -> bool:
+        if not callable(self._unified_chat_mode_provider):
+            return False
+        try:
+            return bool(self._unified_chat_mode_provider())
+        except Exception:
+            return False
+
+    def _background_summary(self) -> str:
+        if not callable(self._background_summary_provider):
+            return ""
+        try:
+            return str(self._background_summary_provider() or "").strip()
+        except Exception:
+            return ""
+
+    async def _generate_reply(
+        self,
+        *,
+        user_text: str,
+        tool: str,
+        payload: dict[str, Any],
+        background_summary: str = "",
+    ) -> str:
         _, _, reply_none_tmpl, reply_action_tmpl = _load_unified_decide_prompts()
         if tool == "none":
             msg = reply_none_tmpl.format(user_text=user_text)
@@ -139,6 +166,13 @@ class UnifiedDecideLLM:
                 user_text=user_text,
                 tool=tool,
                 payload_json=json.dumps(payload, ensure_ascii=False),
+            )
+        if background_summary:
+            msg = (
+                f"{msg}\n\n"
+                "【可顺带提及的后台事件】这些不是用户说的，是系统事件。"
+                "如果和当前对话相关，可自然带一句，最多 1 条；不要生硬罗列。\n"
+                f"{background_summary}"
             )
         reply, _ = await self._acp.prompt(
             self._session_id, msg, trace_tag="v2_unified_reply"
@@ -173,38 +207,46 @@ class UnifiedDecideLLM:
         intent_hint: dict[str, Any] | None = None,
     ) -> Decision:
         _ = user_id
+        bg_summary = self._background_summary() if self._in_unified_chat_mode() else ""
+        force_two_stage = bool(bg_summary)
         combined_prompt = self._build_combined_prompt(
             text=text,
             queue_snapshot=queue_snapshot,
             intent_hint=intent_hint,
         )
-        combined = await self._transport.prompt_structured(
-            prompt=combined_prompt,
-            schema=self._schema(include_reply=True),
-            retry=self._retry_count,
-        )
-        if isinstance(combined, dict):
-            d = dict(combined)
-            d.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
-            tool, payload, reply = _coalesce_unified_decision(d)
-            raw_reply_in_d = str(d.get("reply") or "")
-            if tool == "none" and raw_reply_in_d.strip() and not str(reply or "").strip():
-                log_flow_event(
-                    stage="graph",
-                    route="structured_reply_stripped",
-                    from_user=user_id,
-                    extra={
-                        "msg_trace": raw_reply_in_d[:200],
-                        "raw_reply_len": len(raw_reply_in_d),
-                        "coalesced_reply_len": len(str(reply or "")),
-                        "d_keys": list(d.keys()),
-                    },
-                )
-            if tool == "none" and not str(reply or "").strip():
-                reply = await self._generate_reply(user_text=text, tool=tool, payload=payload)
-            if tool == "none" and not str(reply or "").strip():
-                reply = "我在，继续说。"
-            return Decision(tool=tool, payload=payload, reply=reply)
+        if not force_two_stage:
+            combined = await self._transport.prompt_structured(
+                prompt=combined_prompt,
+                schema=self._schema(include_reply=True),
+                retry=self._retry_count,
+            )
+            if isinstance(combined, dict):
+                d = dict(combined)
+                d.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
+                tool, payload, reply = _coalesce_unified_decision(d)
+                raw_reply_in_d = str(d.get("reply") or "")
+                if tool == "none" and raw_reply_in_d.strip() and not str(reply or "").strip():
+                    log_flow_event(
+                        stage="graph",
+                        route="structured_reply_stripped",
+                        from_user=user_id,
+                        extra={
+                            "msg_trace": raw_reply_in_d[:200],
+                            "raw_reply_len": len(raw_reply_in_d),
+                            "coalesced_reply_len": len(str(reply or "")),
+                            "d_keys": list(d.keys()),
+                        },
+                    )
+                if tool == "none" and not str(reply or "").strip():
+                    reply = await self._generate_reply(
+                        user_text=text,
+                        tool=tool,
+                        payload=payload,
+                        background_summary=bg_summary,
+                    )
+                if tool == "none" and not str(reply or "").strip():
+                    reply = "我在，继续说。"
+                return Decision(tool=tool, payload=payload, reply=reply)
 
         decision_prompt = self._build_decision_only_prompt(
             text=text,
@@ -223,7 +265,12 @@ class UnifiedDecideLLM:
             tool, payload, _ = _coalesce_unified_decision(d)
             if spill and tool == "none":
                 return Decision(tool=tool, payload=payload, reply=spill)
-            reply = await self._generate_reply(user_text=text, tool=tool, payload=payload)
+            reply = await self._generate_reply(
+                user_text=text,
+                tool=tool,
+                payload=payload,
+                background_summary=bg_summary,
+            )
             if tool == "none" and not str(reply or "").strip():
                 reply = "我在，继续说。"
             return Decision(tool=tool, payload=payload, reply=reply)
@@ -239,7 +286,12 @@ class UnifiedDecideLLM:
         obj = self._extract_json_object(raw_reply or "")
         tool, payload, reply = _coalesce_unified_decision(obj if isinstance(obj, dict) else {})
         if tool == "none" and not str(reply or "").strip():
-            reply = await self._generate_reply(user_text=text, tool=tool, payload=payload)
+            reply = await self._generate_reply(
+                user_text=text,
+                tool=tool,
+                payload=payload,
+                background_summary=bg_summary,
+            )
         if tool == "none" and not str(reply or "").strip():
             reply = "我在，继续说。"
         return Decision(tool=tool, payload=payload, reply=reply)

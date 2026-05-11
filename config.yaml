@@ -36,6 +36,7 @@ timeline:
   checkin_enabled: true
   project_overview_path: "1-Projects/项目进度总览.md"
   checkin_context_path: "3-Resources/记忆库/09-daily-rhythm.md"
+  checkin_include_chat_history: true
   checkin_ai_timeout_sec: 12
   checkin_poll_interval_sec: 0
   write_policy: "whitelist_only"
@@ -56,14 +57,7 @@ bot:
   reply_on_error: true           # 出错时告知用户
   typing_indicator: true         # 处理中显示"正在输入"
   max_reply_length: 2000         # 回复最大长度（微信限制）
+  unified_chat_mode: false
   wx_agent_allowlist: ["*"]  # 或具体 wxid
   agent_model: ""  # 为空则沿用 opencode.model
   reminder_polish_enabled: true
-
-graph:
-  enabled: true
-  rollout_rate: 1.0
-  rollout_users: []
-  shadow_mode: false
-  shadow_log_dir: "logs/shadow"
-  rollout_stable_bucket: false

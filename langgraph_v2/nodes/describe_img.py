@@ -16,5 +16,9 @@ async def describe_img(state: ClawBotState, deps) -> ClawBotState:
     desc = str(desc or "").strip()
     if not desc:
         desc = "收到图片"
-    return {"text": desc}
+    caption = str(state.get("text") or "").strip()
+    composed = f"[图片] {desc}"
+    if caption:
+        composed = f"{composed}\n附言：{caption}"
+    return {"text": composed}
 

@@ -679,6 +679,28 @@ class DispatcherMixin:
             session_id=self.unified_session_id,
             extra={"intent_hint": intent_hint},
         )
+        fallback_prompt = (
+            "你必须仅输出 JSON："
+            '{"tool":"none","payload":{},"reply":"一句简短中文回复"}\n'
+            f"用户原话：{text}"
+        )
+        raw_reply, _ = await self.acp.prompt(
+            self.unified_session_id,
+            fallback_prompt,
+            trace_tag="unified_decide_fallback",
+        )
+        raw_txt = (raw_reply or "").strip()
+        obj = self._extract_json_object(raw_txt)
+        if isinstance(obj, dict) and str(obj.get("tool") or "").strip():
+            trace = obj.pop(OpenCodeACP.STRUCTURED_TRACE_META_KEY, None)
+            tool, payload, reply = _coalesce_unified_decision(obj)
+            reply = self._sanitize_vague_none_reply(reply, tool, structured_trace=trace)
+            if reply and max_rl > 0 and len(reply) > max_rl:
+                reply = reply[:max_rl]
+            return {"tool": tool, "payload": payload, "reply": reply}
+        if "{" in raw_txt:
+            fb = raw_txt[:UNIFIED_LEGACY_RAW_FALLBACK_MAX_CHARS]
+            return {"tool": TOOL_DECISION_NONE, "payload": {}, "reply": fb}
         return {"tool": TOOL_DECISION_NONE, "payload": {}, "reply": ""}
 
     async def _apply_unified_decision(
@@ -690,20 +712,6 @@ class DispatcherMixin:
     ) -> bool:
         """执行 dispatcher 表里 tool 名对应的 coach；末尾统一调用 post-write hooks。"""
         tool, payload, reply = _coalesce_unified_decision(decision)
-        if getattr(self, "_eval_mode", False):
-            tr = getattr(self, "_eval_pipeline_trace", None)
-            if isinstance(tr, list):
-                snap = dict(payload) if isinstance(payload, dict) else {}
-                raw = json.dumps(snap, ensure_ascii=False)
-                if len(raw) > 800:
-                    snap = {"_truncated": True, "keys": list(snap.keys())}
-                tr.append(
-                    {
-                        "tool": tool,
-                        "payload": snap,
-                        "reply_preview": (reply or "")[:240],
-                    }
-                )
 
         if tool == TOOL_DECISION_NONE:
             log_flow_event(

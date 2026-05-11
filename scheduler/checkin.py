@@ -45,11 +45,15 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 若用户追问是否写入，请提醒：该格已有内容，默认不会自动追加到时间轴；如需追加请以「追加」开头写一句正文。
 不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。
 可结合下方「标准作息摘要」对照当前时间点给轻量建议；若该节为空则忽略。若有摘要，勿断言用户此刻一定在做其中某一步。
+若下方「最近对话摘要」非空，语气可自然承接上文话题；但仍只输出 1 行微信消息，勿复述大段原文或隐私细节。
 
 当前时间：{time}
 检查的时间节点：{slot}
 该格已有内容：{slot_body}
 时间轴最近一条非空：{last_timeline_line}
+
+【最近对话摘要】
+{chat_tail}
 
 【时间轴节选】
 {timeline_tail}
@@ -80,10 +84,14 @@ _DEFAULT_CHECKIN = """你是中文个人助理，负责「半小时状态 checki
 场景：用户在 {slot} 这个时间点还没有记录，请温和询问「你在 {slot} 这个时间点在做什么」，并给 1 条可执行小建议（可点名拖延项，但不要人身攻击）。
 不要写成「备忘录提醒」或「到点闹钟」语气；那是另一套系统。
 可结合下方「标准作息摘要」对照当前时间点给轻量建议；若该节为空则忽略。若有摘要，勿断言用户此刻一定在做其中某一步。
+若下方「最近对话摘要」非空，语气可自然承接上文话题；但仍只输出 1 行微信消息，勿复述大段原文或隐私细节。
 
 当前时间：{time}
 检查的时间节点：{slot}
 时间轴最近一条非空：{last_timeline_line}
+
+【最近对话摘要】
+{chat_tail}
 
 【时间轴节选】
 {timeline_tail}
@@ -208,7 +216,31 @@ def _rhythm_tail(handler) -> str:
     return _snip_file(p, _RHYTHM_TAIL_MAX_CHARS)
 
 
-async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str: str) -> str:
+def _checkin_wx_target_user(handler) -> str:
+    """与发信目标一致：有 context_tokens 取最近一个 wxid，否则 wx.user_id。"""
+    tok = getattr(handler.wx, "_context_tokens", None) or {}
+    if isinstance(tok, dict) and tok:
+        return str(list(tok.keys())[-1]).strip()
+    return str(getattr(handler.wx, "user_id", "") or "").strip()
+
+
+def _checkin_chat_tail(handler, cfg: dict, user_id: str) -> str:
+    """Handler._build_shared_history 同源；``checkin_include_chat_history`` 为 false 时为空。"""
+    tl = cfg.get("timeline") or {}
+    if not bool(tl.get("checkin_include_chat_history", True)):
+        return ""
+    uid = (user_id or "").strip()
+    if not uid:
+        return ""
+    fn = getattr(handler, "_build_shared_history", None)
+    if callable(fn):
+        return (fn(uid) or "").strip()
+    return ""
+
+
+async def _build_summary_message(
+    handler, *, slot: str, slot_body: str, now_str: str, wx_user_id: str = ""
+) -> str:
     """已填格概括推送：告知当前格已有内容，用户可不回复。"""
     cfg = handler.cfg
     today = datetime.now()
@@ -230,6 +262,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         "life_log_tail": _snip_file(life, 2000),
         "projects_tail": _snip_file(overview, 1200),
         "rhythm_tail": _rhythm_tail(handler),
+        "chat_tail": _checkin_chat_tail(handler, cfg, wx_user_id),
         "chore_hint": get_chore_hint(cfg, slot=slot),
     }
     bot_cfg = cfg.get("bot") or {}
@@ -243,6 +276,7 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         slot_body=ctx["slot_body"],
         slot_preview=slot_preview,
         last_timeline_line=ctx["last_timeline_line"],
+        chat_tail=ctx["chat_tail"],
         timeline_tail=ctx["timeline_tail"],
         diary_tail=ctx["diary_tail"],
         life_log_tail=ctx["life_log_tail"],
@@ -302,7 +336,9 @@ async def _build_summary_message(handler, *, slot: str, slot_body: str, now_str:
         )
 
 
-async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
+async def _build_empty_slot_message(
+    handler, *, slot: str, now_str: str, wx_user_id: str = ""
+) -> str:
     """空格请求记录：请求用户一句话描述当前在做什么。"""
     cfg = handler.cfg
     today = datetime.now()
@@ -323,6 +359,7 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         "life_log_tail": _snip_file(life, 2000),
         "projects_tail": _snip_file(overview, 1200),
         "rhythm_tail": _rhythm_tail(handler),
+        "chat_tail": _checkin_chat_tail(handler, cfg, wx_user_id),
         "chore_hint": get_chore_hint(cfg, slot=slot),
     }
     bot_cfg = cfg.get("bot") or {}
@@ -333,6 +370,7 @@ async def _build_empty_slot_message(handler, *, slot: str, now_str: str) -> str:
         time=ctx["time"],
         slot=ctx["slot_checked"],
         last_timeline_line=ctx["last_timeline_line"],
+        chat_tail=ctx["chat_tail"],
         timeline_tail=ctx["timeline_tail"],
         diary_tail=ctx["diary_tail"],
         life_log_tail=ctx["life_log_tail"],
@@ -415,10 +453,57 @@ async def _checkin_iteration(handler, *, now: datetime | None = None) -> None:
     now_str = now.strftime("%H:%M")
 
     uid = getattr(handler.wx, "user_id", "") or ""
+    wx_user_id = _checkin_wx_target_user(handler)
+    unified_mode = bool((cfg.get("bot") or {}).get("unified_chat_mode", False))
+
+    if unified_mode:
+        if slot_body:
+            short = slot_body[:80] + ("…" if len(slot_body) > 80 else "")
+            handler.add_background_event(
+                kind="checkin_slot_filled",
+                summary=f"{slot} 这半小时你已记录：{short}",
+                priority="deferred",
+                ttl_sec=1800,
+                source="scheduler.checkin",
+            )
+            if wx_user_id:
+                pop_checkin_expect(handler.cfg, wx_user_id)
+            elif uid:
+                pop_checkin_expect(handler.cfg, uid)
+            log_flow_event(
+                stage="checkin",
+                route="poll_event_filled",
+                user_text="",
+                extra={"slot": slot, "preview": short},
+            )
+        else:
+            handler.add_background_event(
+                kind="checkin_slot_empty",
+                summary=f"{slot} 这半小时还没记录，可顺带补一句在做什么。",
+                priority="deferred",
+                ttl_sec=1800,
+                source="scheduler.checkin",
+            )
+            if wx_user_id:
+                set_checkin_expect(handler.cfg, wx_user_id, d_iso, slot)
+            elif uid:
+                set_checkin_expect(handler.cfg, uid, d_iso, slot)
+            log_flow_event(
+                stage="checkin",
+                route="poll_event_empty",
+                user_text="",
+                extra={"slot": slot, "time": now_str},
+            )
+        set_last_ping(cfg, d_iso, slot)
+        return
 
     if slot_body:
         msg = await _build_summary_message(
-            handler, slot=slot, slot_body=slot_body, now_str=now_str
+            handler,
+            slot=slot,
+            slot_body=slot_body,
+            now_str=now_str,
+            wx_user_id=wx_user_id,
         )
         sent = False
         if handler.wx._context_tokens:
@@ -446,7 +531,9 @@ async def _checkin_iteration(handler, *, now: datetime | None = None) -> None:
             extra={"slot": slot, "preview": msg[:80]},
         )
     else:
-        msg = await _build_empty_slot_message(handler, slot=slot, now_str=now_str)
+        msg = await _build_empty_slot_message(
+            handler, slot=slot, now_str=now_str, wx_user_id=wx_user_id
+        )
         if handler.wx._context_tokens:
             last_user, last_token = list(handler.wx._context_tokens.items())[-1]
             await handler.wx.send_text(msg, last_user, last_token)

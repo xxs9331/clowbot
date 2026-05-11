@@ -10,6 +10,7 @@ import pytest
 import handlers.coaches.record as record_mod
 from handlers.coaches.record import RecordCoachMixin
 from tests.helpers import minimal_timeline, minimal_vault
+from utils.log_sync import get_log_path
 from utils.timeline_sync import ensure_timeline_file, get_slot_body
 
 
@@ -71,14 +72,6 @@ def test_event_hhmm_writes_15_slot_not_wall_clock(
     monkeypatch.setattr(record_mod, "datetime", _Dt)
     monkeypatch.setattr(record_mod, "time_str", lambda *_a, **_k: "20:00")
 
-    payloads_seen: list[dict] = []
-
-    def spy_build(domain, *, vault_root, daily_log_dir, payload, output_contract):
-        payloads_seen.append(dict(payload))
-        return "prompt"
-
-    monkeypatch.setattr(record_mod, "build_coach_write_prompt", spy_build)
-
     h = _H(record_cfg)
     ensure_timeline_file(record_cfg, fixed)
 
@@ -92,8 +85,10 @@ def test_event_hhmm_writes_15_slot_not_wall_clock(
 
     asyncio.run(run())
 
-    assert payloads_seen and payloads_seen[0]["now_hhmm"] == "15:00"
-    assert get_slot_body(record_cfg, "15:00", fixed) == "已记下"
+    lp = get_log_path(record_cfg["vault"]["root"], record_cfg["vault"]["daily_log_dir"])
+    log_body = lp.read_text(encoding="utf-8")
+    assert "15:00" in log_body and "吃了弥宁" in log_body
+    assert get_slot_body(record_cfg, "15:00", fixed).strip() != ""
     assert get_slot_body(record_cfg, "20:00", fixed) == ""
 
 
@@ -114,14 +109,6 @@ def test_invalid_event_hhmm_falls_back_to_time_str(
     monkeypatch.setattr(record_mod, "datetime", _Dt)
     monkeypatch.setattr(record_mod, "time_str", lambda *_a, **_k: "12:00")
 
-    payloads_seen: list[dict] = []
-
-    def spy_build(domain, *, vault_root, daily_log_dir, payload, output_contract):
-        payloads_seen.append(dict(payload))
-        return "ok"
-
-    monkeypatch.setattr(record_mod, "build_coach_write_prompt", spy_build)
-
     h = _H(record_cfg)
     ensure_timeline_file(record_cfg, fixed)
 
@@ -135,5 +122,7 @@ def test_invalid_event_hhmm_falls_back_to_time_str(
 
     asyncio.run(run())
 
-    assert payloads_seen[0]["now_hhmm"] == "12:00"
-    assert get_slot_body(record_cfg, "12:00", fixed) == "已记下"
+    lp = get_log_path(record_cfg["vault"]["root"], record_cfg["vault"]["daily_log_dir"])
+    log_body = lp.read_text(encoding="utf-8")
+    assert "12:00" in log_body and "测试" in log_body
+    assert get_slot_body(record_cfg, "12:00", fixed).strip() != ""

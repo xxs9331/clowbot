@@ -41,6 +41,8 @@ async def remind_check_loop(handler):
     last_day = None
     reminder_heap = []
     log_path = None
+    bot_cfg = handler.cfg.get("bot") or {}
+    unified_mode = bool(bot_cfg.get("unified_chat_mode", False))
 
     while True:
         try:
@@ -75,18 +77,26 @@ async def remind_check_loop(handler):
                 if rid in handler._reminded_ids:
                     continue
 
-                bot_cfg = handler.cfg.get("bot") or {}
-                msg = await build_reminder_wx_message(
-                    getattr(handler, "acp", None),
-                    bot_cfg,
-                    remind_time=r["time"],
-                    remind_text=r["text"],
-                )
-                if handler.wx._context_tokens:
-                    last_user, last_token = list(handler.wx._context_tokens.items())[-1]
-                    await handler.wx.send_text(msg, last_user, last_token)
+                if unified_mode:
+                    summary = f"对了，你 {r['time']} 有「{r['text']}」。"
+                    handler.add_background_event(
+                        kind="reminder_due",
+                        summary=summary,
+                        priority="immediate",
+                        source="scheduler.reminders",
+                    )
                 else:
-                    await handler.wx.send_text(msg, handler.wx.user_id, "")
+                    msg = await build_reminder_wx_message(
+                        getattr(handler, "acp", None),
+                        bot_cfg,
+                        remind_time=r["time"],
+                        remind_text=r["text"],
+                    )
+                    if handler.wx._context_tokens:
+                        last_user, last_token = list(handler.wx._context_tokens.items())[-1]
+                        await handler.wx.send_text(msg, last_user, last_token)
+                    else:
+                        await handler.wx.send_text(msg, handler.wx.user_id, "")
                 print(f"[Bot] ⏰ 提醒触发: {r['text']}")
 
                 ok = mark_reminder_done_by_time_text(log_path, r["time"], r["text"])
@@ -113,6 +123,14 @@ async def remind_check_loop(handler):
                             append_to_markdown_section(
                                 todo_log_path, "## 📋 待办", f"- [ ] {remind_text}"
                             )
+                            if unified_mode:
+                                handler.add_background_event(
+                                    kind="disk_write_done",
+                                    summary=f"已自动加入待办：{remind_text}",
+                                    priority="silent",
+                                    ttl_sec=180,
+                                    source="scheduler.reminders",
+                                )
                     except Exception:
                         # 写盘失败不影响提醒推送主流程
                         pass

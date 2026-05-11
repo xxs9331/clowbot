@@ -20,12 +20,11 @@ cases:
     pre_setup: { active_todo_queue: true, tasks: ["写代码", "跑评测"], idx: 0 }
     expect_tool: "todo.done_current"
     expect_reply_contains:
-      - "处理中"
       - "下一个"
       - "写代码"
       - "跑评测"
     expect_decisions_len: 1
-    expect_wx_max_len: 3
+    expect_wx_max_len: 2
     expect_tool_counts:
       todo.done_current: 1
 

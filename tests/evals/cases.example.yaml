@@ -17,23 +17,20 @@ cases:
     expect_tool: "todo.done_current"
     expect_state_contains: ["待办推进: todo.done_current"]
     expect_reply_contains:
-      - "处理中"
       - "下一个"
       - "写评测骨架"
       - "补 structured state"
     expect_decisions_len: 1
-    expect_wx_max_len: 3
+    expect_wx_max_len: 2
     expect_tool_counts:
       todo.done_current: 1
 
-  # 简单：查看待办（自然语言）→ 不再前置拦截，离线 acp=None 下走 safe_fallback
+  # 简单：查看待办（自然语言）→ LangGraph + stub LLM（离线评测无 vault 正文时可视为闲聊 none）
   # 想看本地📋节请用 /待办 slash 命令（只在 handle() 里生效，evaluator 不覆盖）
   - id: local_view_todo
     tier: simple
     input: "查看待办"
-    expect_eval_extra_branch: "safe_fallback"
-    expect_reply_contains:
-      - "记一下"
+    expect_tool: "none"
 
   - id: p1b_done_when_queue_tail
     tier: simple
@@ -45,19 +42,15 @@ cases:
       idx: 0
     expect_tool: "todo.done_current"
     expect_reply_contains:
-      - "处理中"
-      - "下一个"
       - "最后一项"
       - "全部完成"
     expect_decisions_len: 1
-    expect_wx_max_len: 3
+    expect_wx_max_len: 2
     expect_tool_counts:
       todo.done_current: 1
 
-  # 中等：无规则命中、无 LLM（acp=None）→ unified 失败后 safe_fallback
+  # 中等：无规则命中；stub LLM 仍返回结构化 none（不复现旧版 safe_fallback 文案）
   - id: safe_fallback_gibberish
     tier: medium
     input: "xyzabc 无意义一串"
-    expect_eval_extra_branch: "safe_fallback"
-    expect_reply_contains:
-      - "记一下"
+    expect_tool: "none"

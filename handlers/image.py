@@ -1,11 +1,11 @@
-"""微信图片消息：下载 + 多模态描述 → 走和文字一样的 record.add 路径。
+"""微信图片消息：下载 → Base64 注入 LangGraph（describe_img → 决策 → DomainServices）。
 
-不再 ad-hoc 拼 prompt 写盘；图片描述出来后构造一个 user_text 喂给统一决策层，
-分流 LLM 给出 record.add（含 category 推断），由 RecordCoachMixin 完成写入。
+写盘仍由工具链（record.add 等）与 Handler 适配方法完成。
 """
 
 from __future__ import annotations
 
+import base64
 import json as _json
 import re
 
@@ -52,60 +52,38 @@ class ImageMixin:
                 await self.wx.send_text("图片下载失败", from_user, context_token)
                 return
 
-            print(f"[Bot] 🖼 图片已下载: {len(img_data)} bytes")
+            print(f"[Bot] 🖼 图片已下载: {len(img_data)} bytes（交由 LangGraph describe_img）")
 
-            mm_model = self.cfg["opencode"].get(
-                "multimodal_model", "opencode-go/mimo-v2-omni"
-            )
-            vision_sid = await self.acp.create_session(mm_model)
-
-            desc, reasoning = await self.acp.prompt_with_image(
-                vision_sid,
-                "用简洁的中文描述这张图片的内容，只描述可见内容，不要推理。",
-                img_data,
-                trace_tag="vision_describe",
-                log_model=mm_model,
-            )
-            image_desc = self._pick_vision_desc(desc, reasoning)
-            print(f"[Bot] 👁 图片描述: {image_desc[:100]}")
-
-            # 把图片描述（+用户附言）当作普通文本，丢给统一分流决策。
-            user_text_for_route = f"[图片] {image_desc}"
+            if from_user not in self._conversation_window:
+                self._restore_conversation_window(from_user)
+            user_line = "[图片]"
             if text:
-                user_text_for_route = f"{user_text_for_route}\n附言：{text}"
-            async def _legacy_runner():
-                decision = await self._llm_unified_decide(from_user, user_text_for_route)
-                log_flow_event(
-                    stage="route",
-                    route="image_to_unified",
-                    user_text=user_text_for_route,
-                    from_user=from_user,
-                    session_id=self.session_id,
-                    extra={"decision": decision},
-                )
-                handled = await self._apply_unified_decision(
-                    decision,
-                    from_user,
-                    context_token,
-                    user_text=user_text_for_route,
-                )
-                if not handled:
-                    await self.wx.send_text(
-                        "我看到了图片，没看出要记什么。要我记成生活记录吗？",
-                        from_user,
-                        context_token,
-                    )
+                user_line = f"{user_line}\n附言：{text}"
+            self._append_conversation_user(from_user, user_line)
 
-            if self._dual_dispatcher is not None:
-                await self._dual_dispatcher.dispatch_text(
-                    text=user_text_for_route,
-                    from_user=from_user,
-                    context_token=context_token,
-                    legacy_runner=_legacy_runner,
-                    send_text=self.wx.send_text,
-                )
-            else:
-                await _legacy_runner()
+            b64 = base64.b64encode(img_data).decode("ascii")
+            mime = "image/jpeg"
+            if len(img_data) >= 8 and img_data[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif img_data[:6] in (b"GIF87a", b"GIF89a"):
+                mime = "image/gif"
+            elif img_data[:4] == b"RIFF" and img_data[8:12] == b"WEBP":
+                mime = "image/webp"
+
+            log_flow_event(
+                stage="route",
+                route="image_to_graph",
+                user_text=text or "(无附言)",
+                from_user=from_user,
+                session_id=self.session_id,
+            )
+            await self._run_chat_graph_turn(
+                text=text,
+                from_user=from_user,
+                context_token=context_token,
+                image_base64=b64,
+                image_mime=mime,
+            )
 
         except Exception as e:  # noqa: BLE001
             print(f"[Bot] 图片处理错误: {e}")

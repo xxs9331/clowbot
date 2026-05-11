@@ -133,31 +133,20 @@ def test_collect_errors_checkin_context_path_ok_relative():
     assert collect_config_errors(cfg) == []
 
 
-def test_collect_errors_graph_rollout_range():
+def test_collect_errors_checkin_include_chat_history_type():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": {**minimal_timeline("/x"), "checkin_include_chat_history": "yes"},
+    }
+    errs = collect_config_errors(cfg)
+    assert any("checkin_include_chat_history" in e for e in errs)
+
+
+def test_collect_errors_graph_section_ignored():
+    """graph.* 灰度字段已移除校验（主链路固定 LangGraph）。"""
     cfg = {
         "vault": minimal_vault("/x"),
         "timeline": minimal_timeline("/x"),
-        "graph": {"enabled": True, "shadow_mode": False, "rollout_rate": 1.2, "rollout_users": []},
+        "graph": {"enabled": False, "shadow_mode": True, "rollout_rate": 9.9},
     }
-    errs = collect_config_errors(cfg)
-    assert any("graph.rollout_rate" in e for e in errs)
-
-
-def test_collect_errors_graph_shadow_requires_log_dir():
-    cfg = {
-        "vault": minimal_vault("/x"),
-        "timeline": minimal_timeline("/x"),
-        "graph": {"enabled": True, "shadow_mode": True, "rollout_rate": 0.2, "rollout_users": [], "shadow_log_dir": ""},
-    }
-    errs = collect_config_errors(cfg)
-    assert any("graph.shadow_log_dir" in e for e in errs)
-
-
-def test_collect_errors_graph_shadow_when_disabled():
-    cfg = {
-        "vault": minimal_vault("/x"),
-        "timeline": minimal_timeline("/x"),
-        "graph": {"enabled": False, "shadow_mode": True, "rollout_rate": 0.0, "rollout_users": []},
-    }
-    errs = collect_config_errors(cfg)
-    assert any("graph.shadow_mode must be false when graph.enabled=false" in e for e in errs)
+    assert collect_config_errors(cfg) == []

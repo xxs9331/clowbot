@@ -9,19 +9,15 @@ import uuid
 from pathlib import Path
 
 from acp.opencode_client import OpenCodeACP, build_system_prompt
-from utils.intent import (
-    INTENT_REMIND,
-    detect_intent,
-)
+from utils.context_injector import InjectedContextStore
 from utils.flow_log import log_flow_event, snapshot_todo_queue
 from utils.timeline_state import mark_daily_opening_chat
 from utils.timeline_sync import timeline_enabled, timeline_path
 from utils.route_fast import build_fast_unified_decision
-from utils.tool_names import TOOL_TODO_DONE_CURRENT
 from wechat.client import ClawBotClient
 
 from .coaches import RecordCoachMixin, RemindCoachMixin, TimelineAppendMixin, TodoCoachMixin
-from .dispatcher import DispatcherMixin, _coalesce_unified_decision
+from .dispatcher import DispatcherMixin
 from .image import ImageMixin
 from .local_view import LocalViewMixin
 from .timeline_hooks import TimelineHooksMixin
@@ -43,7 +39,7 @@ class Handler(
       - TimelineHooksMixin 时间轴睡觉、checkin 回填前置（起床=每日首条微信，见 handle）
       - LocalViewMixin    本地读今日 md，输出查看类回复
       - ImageMixin        图片消息：多模态描述 → 走 record.add
-      - DispatcherMixin   决策与分发（_llm_unified_decide / _apply_unified_decision）
+      - DispatcherMixin   工具执行注册表（_apply_unified_decision；主对话由 LangGraph 调度）
       - TodoCoachMixin    待办 8 个 coach + 内存队列
       - RecordCoachMixin  生活记录写入
       - RemindCoachMixin  提醒写入（写完由 hooks 自动唤醒调度器）
@@ -90,7 +86,12 @@ class Handler(
         # 共享对话历史窗口：按 from_user 分桶，注入 unified prompt 让 reply 自带跨轮上下文
         self._conversation_window: dict[str, list[dict]] = {}
         self._conversation_window_max: int = 10
-        self._dual_dispatcher = None
+        # 单用户后台事件注入（统一聊天出口）
+        self._bg_events = InjectedContextStore()
+        self._chat_lock: asyncio.Lock = asyncio.Lock()
+        self._signal_trigger_lock: asyncio.Lock = asyncio.Lock()
+        self._last_user_msg_ts: float = 0.0
+        self._chat_graph_dispatcher = None
         if hasattr(self.acp, "set_permission_request_handler"):
             self.acp.set_permission_request_handler(self._on_acp_permission_request)
 
@@ -108,6 +109,143 @@ class Handler(
         if not allow:
             return False
         return "*" in allow or from_user in allow
+
+    def _unified_chat_mode_enabled(self) -> bool:
+        bot_cfg = self.cfg.get("bot") or {}
+        return bool(bot_cfg.get("unified_chat_mode", False))
+
+    @staticmethod
+    def _normalize_bg_priority(priority: str) -> str:
+        p = str(priority or "deferred").strip().lower()
+        if p not in ("immediate", "deferred", "silent"):
+            return "deferred"
+        return p
+
+    def add_background_event(
+        self,
+        *,
+        kind: str,
+        summary: str,
+        priority: str = "deferred",
+        ttl_sec: float | None = None,
+        source: str = "",
+    ) -> str:
+        """调度器/后台流程统一入口：仅在 unified_chat_mode 打开时记录。"""
+        if not self._unified_chat_mode_enabled():
+            return ""
+        eid = self._bg_events.add_event(
+            kind=kind,
+            summary=summary,
+            priority=self._normalize_bg_priority(priority),
+            ttl_sec=ttl_sec,
+            source=source,
+        )
+        log_flow_event(
+            stage="route",
+            route="event_queued",
+            user_text="",
+            from_user="",
+            session_id=self.unified_session_id,
+            extra={
+                "event_id": eid,
+                "kind": kind,
+                "priority": priority,
+                "summary": str(summary or "")[:120],
+            },
+        )
+        return eid
+
+    def _peek_background_events_summary_for_compose(self, *, max_items: int = 3) -> str:
+        if not self._unified_chat_mode_enabled():
+            return ""
+        self._bg_events.prune_expired()
+        summary, _ids = self._bg_events.peek_compose_summary(max_items=max_items)
+        return summary
+
+    def _resolve_recent_target(self) -> tuple[str, str]:
+        tok = getattr(self.wx, "_context_tokens", None) or {}
+        if isinstance(tok, dict) and tok:
+            last_user, last_token = list(tok.items())[-1]
+            return str(last_user or "").strip(), str(last_token or "")
+        return str(getattr(self.wx, "user_id", "") or "").strip(), ""
+
+    def _user_recently_active(self, sec: float = 5.0) -> bool:
+        if self._last_user_msg_ts <= 0:
+            return False
+        return (time.monotonic() - self._last_user_msg_ts) < float(sec)
+
+    async def _background_event_pump(self) -> None:
+        """后台事件泵：检测 immediate 事件并尝试主动触达。"""
+        while True:
+            try:
+                await asyncio.sleep(2)
+                if not self._unified_chat_mode_enabled():
+                    continue
+                self._bg_events.prune_expired()
+                if not self._bg_events.has_immediate():
+                    continue
+                if self._user_recently_active(5.0):
+                    continue
+                await self.signal_trigger()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001
+                log_flow_event(
+                    stage="route",
+                    route="event_pump_error",
+                    user_text="",
+                    from_user="",
+                    session_id=self.unified_session_id,
+                    extra={"error": str(e)[:200]},
+                )
+
+    async def _signal_trigger_immediate(self) -> bool:
+        """主动触达 immediate 事件；发送成功即 consumed。"""
+        events = self._bg_events.peek_events(priority="immediate")
+        if not events:
+            return False
+        user_id, context_token = self._resolve_recent_target()
+        if not user_id:
+            return False
+        top = events[0]
+        prompt = (
+            "你是微信个人助手。请发一条自然中文短消息给用户（1~2句）。\n"
+            "这不是用户刚发来的消息，而是系统提醒事件。\n"
+            f"事件：{top.summary}\n"
+            "要求：自然、不生硬，不要罗列多个事项。"
+        )
+        reply, _ = await self.acp.prompt(
+            self.unified_session_id,
+            prompt,
+            trace_tag="background_signal",
+        )
+        body = (reply or "").strip() or top.summary
+        await self.wx.send_text(body, user_id, context_token)
+        self._append_conversation_assistant(user_id, body)
+        self._bg_events.mark_consumed([top.id])
+        log_flow_event(
+            stage="route",
+            route="event_sent",
+            user_text="",
+            from_user=user_id,
+            session_id=self.unified_session_id,
+            extra={"event_id": top.id, "kind": top.kind, "priority": top.priority},
+        )
+        return True
+
+    async def signal_trigger(self) -> bool:
+        """统一主动触达入口：不抢占 handle()。"""
+        if not self._unified_chat_mode_enabled():
+            return False
+        if self._chat_lock.locked():
+            return False
+        if self._user_recently_active(5.0):
+            return False
+        async with self._signal_trigger_lock:
+            if self._chat_lock.locked():
+                return False
+            async with self._chat_lock:
+                return await self._signal_trigger_immediate()
 
     async def _on_acp_permission_request(self, req: dict) -> str:
         """ACP 权限请求回调：agent session 一律挂起待微信确认，其它会话自动批准。"""
@@ -223,6 +361,7 @@ class Handler(
         body = (reply or "").strip()
         if body:
             await self.wx.send_text(body, from_user, context_token)
+            self._append_conversation_assistant(from_user, body)
         log_flow_event(
             stage="exit",
             route="wx_agent_turn",
@@ -866,17 +1005,21 @@ class Handler(
                 self.acp.set_session_permission_mode(self.debug_session_id, "auto")
             parts.append(f"debug={self.debug_session_id}")
         print(f"[Bot] sessions: {' '.join(parts)}")
-        await self._init_dual_dispatcher()
+        self._init_chat_graph()
 
-    async def _init_dual_dispatcher(self) -> None:
-        graph_cfg = self.cfg.get("graph") or {}
-        if not bool(graph_cfg.get("enabled", False)):
-            self._dual_dispatcher = None
-            return
+    def _ensure_chat_graph(self) -> None:
+        if self._chat_graph_dispatcher is None:
+            self._init_chat_graph()
+
+    def _init_chat_graph(self) -> None:
         try:
-            from langgraph_v2.adapters import RuleIntentClassifier, UnifiedDecideLLM
+            from langgraph_v2.adapters import (
+                ACPImageDescriber,
+                RuleIntentClassifier,
+                UnifiedDecideLLM,
+            )
             from langgraph_v2.contracts import ACPSessionPool
-            from langgraph_v2.dispatcher import DualPathDispatcher
+            from langgraph_v2.dispatcher import ChatGraphDispatcher
             from langgraph_v2.graph import GraphDeps, build_chat_graph
 
             llm = UnifiedDecideLLM(
@@ -885,6 +1028,8 @@ class Handler(
                 retry_count=int(
                     (self.cfg.get("opencode") or {}).get("structured_retry_count", 3) or 3
                 ),
+                background_summary_provider=self._peek_background_events_summary_for_compose,
+                unified_chat_mode_provider=self._unified_chat_mode_enabled,
             )
             classifier = RuleIntentClassifier()
             sessions = ACPSessionPool(
@@ -895,26 +1040,141 @@ class Handler(
                 agent=self.agent_session_id,
                 debug=self.debug_session_id,
             )
+            mm_model = str(
+                (self.cfg.get("opencode") or {}).get(
+                    "multimodal_model", "opencode-go/mimo-v2-omni"
+                )
+                or ""
+            )
+            image_llm = ACPImageDescriber(self.acp, mm_model)
             deps = GraphDeps(
                 llm=llm,
-                image_llm=None,
+                image_llm=image_llm,
                 classifier=classifier,
-                vault=self,  # Adapter methods on Handler
-                todo=self,   # Adapter methods on Handler
+                vault=self,
+                todo=self,
                 sessions=sessions,
                 acl=None,
             )
             graph = build_chat_graph(deps)
-            self._dual_dispatcher = DualPathDispatcher(graph=graph, config=self.cfg)
-            log_flow_event(stage="graph", route="dual_dispatcher_ready", user_text="")
+            self._chat_graph_dispatcher = ChatGraphDispatcher(graph=graph)
+            log_flow_event(stage="graph", route="chat_graph_ready", user_text="")
         except Exception as e:
-            self._dual_dispatcher = None
+            self._chat_graph_dispatcher = None
             log_flow_event(
                 stage="graph",
-                route="dual_dispatcher_init_failed",
+                route="chat_graph_init_failed",
                 user_text="",
                 extra={"error": str(e)[:200]},
             )
+
+    def _remaining_queue_tasks(self, user_id: str) -> list[str]:
+        st = self._todo_queues.get(user_id)
+        if not st:
+            return []
+        tasks = st.get("tasks") or []
+        idx = int(st.get("idx", 0))
+        out: list[str] = []
+        for t in tasks[idx:]:
+            s = str(t).strip()
+            if s:
+                out.append(s)
+        return out
+
+    async def _maybe_block_agent_step_limit(
+        self, text: str, from_user: str, context_token: str
+    ) -> bool:
+        max_steps = int(self._get_agent_config("max_steps", 15) or 15)
+        state = self._get_or_init_structured_state(from_user)
+        auto_steps = state.get("consecutive_auto_steps", 0)
+        if auto_steps < max_steps:
+            return False
+        log_flow_event(
+            stage="route",
+            route="agent_step_limit_reached",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={
+                "consecutive_auto_steps": auto_steps,
+                "max_steps": max_steps,
+                "task": state.get("task", "")[:120],
+                "next_step": state.get("next_step", "")[:120],
+            },
+        )
+        task = (state.get("task") or "无")[:80]
+        findings = state.get("findings_so_far", []) or []
+        findings_line = "、".join(str(f)[:60] for f in findings[-3:]) or "无"
+        await self.wx.send_text(
+            "🏁 已连续执行太多步，先停一下。\n\n"
+            f"当前任务：{task}\n"
+            f"已确认：{findings_line}\n"
+            f"下一步计划：{state.get('next_step', '待定')[:80]}\n\n"
+            "要继续的话，直接告诉我要做什么~",
+            from_user,
+            context_token,
+        )
+        return True
+
+    async def _run_chat_graph_turn(
+        self,
+        text: str,
+        from_user: str,
+        context_token: str,
+        *,
+        image_base64: str = "",
+        image_mime: str = "",
+    ) -> None:
+        self._ensure_chat_graph()
+        disp = self._chat_graph_dispatcher
+        if disp is None:
+            await self.wx.send_text(
+                "对话引擎初始化失败，请检查依赖（如 langgraph）与日志。",
+                from_user,
+                context_token,
+            )
+            return
+        msg_trace = uuid.uuid4().hex[:12]
+        log_flow_event(
+            stage="route",
+            route="chat_graph_turn",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={"trace": msg_trace},
+        )
+        qs = self._remaining_queue_tasks(from_user)
+        state = await disp.dispatch(
+            text=text,
+            from_user=from_user,
+            context_token=context_token,
+            queue_snapshot=qs,
+            send_text=self.wx.send_text,
+            image_base64=image_base64,
+            image_mime=image_mime,
+            agent_mode=False,
+        )
+        reply_sent = str(state.get("_dispatch_reply_sent") or "").strip()
+        if reply_sent:
+            self._append_conversation_assistant(from_user, reply_sent)
+        decision = state.get("decision") if isinstance(state.get("decision"), dict) else {}
+        handled = bool(state.get("handled", False))
+        if decision:
+            self._update_structured_state(
+                from_user,
+                decision=decision,
+                handled=handled,
+                user_text=text,
+            )
+        await self._maybe_checkpoint(from_user)
+        log_flow_event(
+            stage="exit",
+            route="chat_graph_turn",
+            user_text=text,
+            from_user=from_user,
+            session_id=self.session_id,
+            extra={"trace": msg_trace, "handled": handled},
+        )
 
     # ── LangGraph v2 repository adapter methods ──
 
@@ -1194,6 +1454,27 @@ class Handler(
 
         return {"tool": tool, "payload": payload, "reply": reply}
 
+    def note_eval_tool_execution(
+        self, *, tool: str, payload: dict, reply_preview: str = ""
+    ) -> None:
+        """LangGraph execute 节点写入评测 trace（不经 `_apply_unified_decision`）。"""
+        if not getattr(self, "_eval_mode", False):
+            return
+        tr = getattr(self, "_eval_pipeline_trace", None)
+        if not isinstance(tr, list):
+            return
+        snap = dict(payload) if isinstance(payload, dict) else {}
+        raw = json.dumps(snap, ensure_ascii=False)
+        if len(raw) > 800:
+            snap = {"_truncated": True, "keys": list(snap.keys())}
+        tr.append(
+            {
+                "tool": tool,
+                "payload": snap,
+                "reply_preview": (reply_preview or "")[:240],
+            }
+        )
+
     async def eval_run_routing_pipeline(
         self,
         text: str,
@@ -1201,16 +1482,38 @@ class Handler(
         from_user: str = "eval-001",
         context_token: str = "eval-ctx",
     ) -> dict:
-        """离线评测：走 `_run_chat_routing_pipeline`，不经过 `handle` 的 typing/本地视图前置。
-
-        返回 `decisions_applied`（每次进入 `_apply_unified_decision` 的 tool/payload 摘要）、
-        `wx_sent`（DummyWX 收集的可见回复）、`eval_extras`（未走 apply 的分支标记）。
-        """
+        """离线评测：走 LangGraph 主链路（与线上一致），不经 `handle` 的 typing/ slash 分支。"""
         self._eval_mode = True
         self._eval_pipeline_trace = []
         self._eval_extras: list[dict] = []
         try:
-            await self._run_chat_routing_pipeline(text, from_user, context_token)
+            self._ensure_chat_graph()
+            if from_user not in self._conversation_window:
+                self._restore_conversation_window(from_user)
+            self._append_conversation_user(from_user, text)
+            if await self._maybe_block_agent_step_limit(text, from_user, context_token):
+                return {
+                    "user_text": text,
+                    "from_user": from_user,
+                    "decisions_applied": [],
+                    "eval_extras": [],
+                    "wx_sent": list(getattr(self.wx, "sent", []) or []),
+                    "structured_state_snapshot": {},
+                }
+            msg_trace = uuid.uuid4().hex[:12]
+            ran_agent = False
+            if (
+                build_fast_unified_decision(text, from_user, self._todo_queues) is None
+                and self._is_wx_agent_user(from_user)
+            ):
+                ran_agent = await self._handle_wx_opencode_agent(
+                    from_user=from_user,
+                    text=text,
+                    context_token=context_token,
+                    msg_trace=msg_trace,
+                )
+            if not ran_agent:
+                await self._run_chat_graph_turn(text, from_user, context_token)
         finally:
             self._eval_mode = False
         sent = getattr(self.wx, "sent", [])
@@ -1235,233 +1538,6 @@ class Handler(
             "structured_state_snapshot": state_snapshot,
         }
 
-    async def _run_chat_routing_pipeline(
-        self, text: str, from_user: str, context_token: str
-    ) -> None:
-        """规则守卫 → 快通道 → 意图分类 → 统一决策 → 安全兜底。"""
-        msg_trace = uuid.uuid4().hex[:12]
-        # 进入路由即记录用户消息（覆盖 handle 与 eval 两条路径）
-        if from_user not in self._conversation_window:
-            self._restore_conversation_window(from_user)
-        self._append_conversation_user(from_user, text)
-        log_flow_event(
-            stage="route",
-            route="chat_pipeline",
-            user_text=text,
-            from_user=from_user,
-            session_id=self.session_id,
-            extra={"trace": msg_trace},
-        )
-
-        # ── 步数硬上限检测 ──
-        max_steps = int(self._get_agent_config("max_steps", 15) or 15)
-        state = self._get_or_init_structured_state(from_user)
-        auto_steps = state.get("consecutive_auto_steps", 0)
-        if auto_steps >= max_steps:
-            log_flow_event(
-                stage="route",
-                route="agent_step_limit_reached",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={
-                    "trace": msg_trace,
-                    "consecutive_auto_steps": auto_steps,
-                    "max_steps": max_steps,
-                    "task": state.get("task", "")[:120],
-                    "next_step": state.get("next_step", "")[:120],
-                },
-            )
-            task = (state.get("task") or "无")[:80]
-            findings = state.get("findings_so_far", []) or []
-            findings_line = "、".join(str(f)[:60] for f in findings[-3:]) or "无"
-            await self.wx.send_text(
-                "🏁 已连续执行太多步，先停一下。\n\n"
-                f"当前任务：{task}\n"
-                f"已确认：{findings_line}\n"
-                f"下一步计划：{state.get('next_step', '待定')[:80]}\n\n"
-                "要继续的话，直接告诉我要做什么~",
-                from_user,
-                context_token,
-            )
-            return
-
-        fast_decision = build_fast_unified_decision(text, from_user, self._todo_queues)
-        if fast_decision:
-            log_flow_event(
-                stage="route",
-                route="fast_unified",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={
-                    "trace": msg_trace,
-                    "decision": fast_decision,
-                    "queue": snapshot_todo_queue(self._todo_queues, from_user),
-                },
-            )
-            ftool, _, _ = _coalesce_unified_decision(fast_decision)
-            auto_done = ftool == TOOL_TODO_DONE_CURRENT
-            completed_label = ""
-            if auto_done:
-                completed_label = self._get_current_queue_task(from_user)
-                self._auto_advance_begin(
-                    from_user=from_user,
-                    user_text=text,
-                    msg_trace=msg_trace,
-                    completed_preview=completed_label,
-                )
-                await self.wx.send_text("处理中…", from_user, context_token)
-            handled_fast = False
-            try:
-                handled_fast = await self._apply_unified_decision(
-                    fast_decision,
-                    from_user,
-                    context_token,
-                    user_text=text,
-                )
-            finally:
-                if auto_done:
-                    self._auto_advance_active = False
-            self._update_structured_state(
-                from_user,
-                decision=fast_decision,
-                handled=handled_fast,
-                user_text=text,
-            )
-            if auto_done:
-                next_task = self._get_current_queue_task(from_user)
-                if handled_fast:
-                    await self._auto_advance_finalize(
-                        from_user=from_user,
-                        context_token=context_token,
-                        user_text=text,
-                        msg_trace=msg_trace,
-                        completed_label=completed_label,
-                        max_steps=max_steps,
-                        next_task=next_task,
-                    )
-                else:
-                    self._auto_advance_results = []
-            await self._maybe_checkpoint(from_user)
-            log_flow_event(
-                stage="exit",
-                route="fast_unified",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={"trace": msg_trace, "handled": handled_fast},
-            )
-            if handled_fast:
-                return
-
-        if self._is_wx_agent_user(from_user):
-            handled_agent = await self._handle_wx_opencode_agent(
-                from_user=from_user,
-                text=text,
-                context_token=context_token,
-                msg_trace=msg_trace,
-            )
-            if handled_agent:
-                return
-
-        queue_state = snapshot_todo_queue(self._todo_queues, from_user)
-        log_flow_event(
-            stage="route",
-            route="llm_unified_enter",
-            user_text=text,
-            from_user=from_user,
-            session_id=self.session_id,
-            extra={"trace": msg_trace, "queue": queue_state},
-        )
-        decision = await self._llm_unified_decide(
-            from_user, text, intent_hint=None
-        )
-        # LLM 已生成 reply，无论是否被 _apply 接受都记入对话窗口
-        self._append_conversation_assistant(from_user, decision.get("reply", ""))
-        handled = await self._apply_unified_decision(
-            decision,
-            from_user,
-            context_token,
-            user_text=text,
-        )
-        self._update_structured_state(
-            from_user,
-            decision=decision,
-            handled=handled,
-            user_text=text,
-        )
-        await self._maybe_checkpoint(from_user)
-        log_flow_event(
-            stage="exit",
-            route="llm_unified",
-            user_text=text,
-            from_user=from_user,
-            session_id=self.session_id,
-            extra={
-                "trace": msg_trace,
-                "handled": handled,
-                "decision": decision,
-                "intent_source": "unified",
-            },
-        )
-        if handled:
-            return
-
-        intent, data = detect_intent(text)
-        if intent == INTENT_REMIND:
-            log_flow_event(
-                stage="route",
-                route="intent_remind",
-                user_text=text,
-                from_user=from_user,
-                session_id=self.session_id,
-                extra={"trace": msg_trace, "remind_payload": data},
-            )
-            hhmm, _, remind_text = data.partition("：")
-            remind_text = remind_text.strip() or data
-            hhmm = hhmm.strip()
-            decision = {
-                "tool": "remind.add",
-                "payload": {"text": remind_text, "hhmm": hhmm},
-                "reply": "",
-            }
-            await self._apply_unified_decision(
-                decision, from_user, context_token, user_text=text
-            )
-            self._update_structured_state(
-                from_user,
-                decision=decision,
-                handled=True,
-                user_text=text,
-            )
-            await self._maybe_checkpoint(from_user)
-            print(f"[Bot] ⏰ 提醒: {data}")
-            return
-        log_flow_event(
-            stage="route",
-            route="safe_fallback",
-            user_text=text,
-            from_user=from_user,
-            session_id=self.session_id,
-            extra={
-                "trace": msg_trace,
-                "intent": intent,
-                "intent_data": data,
-                "intent_source": "safe_fallback",
-            },
-        )
-        if getattr(self, "_eval_mode", False):
-            ex = getattr(self, "_eval_extras", None)
-            if isinstance(ex, list):
-                ex.append({"branch": "safe_fallback"})
-        await self.wx.send_text(
-            "我没看懂这条要怎么记。要我把它当作生活记录写进今日日记吗？回「记一下」即可。",
-            from_user,
-            context_token,
-        )
-        print(f"[Bot] >>> safe_fallback: {text[:60]}")
-
     async def handle(self, msg: dict):
         text = msg.get("text", "").strip()
         msg_type = msg.get("type", "text")
@@ -1474,6 +1550,8 @@ class Handler(
 
         if not text:
             return
+
+        self._last_user_msg_ts = time.monotonic()
 
         if await self._maybe_handle_agent_permission_reply(text, from_user, context_token):
             return
@@ -1603,22 +1681,50 @@ class Handler(
         print(f"[Bot] <<< {text[:50]}")
         await self.wx.set_typing(to_user=from_user, status=1, context_token=context_token)
         try:
-            async def _legacy_runner() -> None:
-                await self._run_chat_routing_pipeline(text, from_user, context_token)
-
-            if self._dual_dispatcher is not None:
-                await self._dual_dispatcher.dispatch_text(
-                    text=text,
-                    from_user=from_user,
-                    context_token=context_token,
-                    legacy_runner=_legacy_runner,
-                    send_text=self.wx.send_text,
-                )
+            if self._unified_chat_mode_enabled():
+                self._bg_events.prune_expired()
+            if from_user not in self._conversation_window:
+                self._restore_conversation_window(from_user)
+            self._append_conversation_user(from_user, text)
+            if await self._maybe_block_agent_step_limit(text, from_user, context_token):
+                return
+            msg_trace = uuid.uuid4().hex[:12]
+            if self._unified_chat_mode_enabled():
+                async with self._chat_lock:
+                    ran_agent = False
+                    if (
+                        build_fast_unified_decision(text, from_user, self._todo_queues) is None
+                        and self._is_wx_agent_user(from_user)
+                    ):
+                        ran_agent = await self._handle_wx_opencode_agent(
+                            from_user=from_user,
+                            text=text,
+                            context_token=context_token,
+                            msg_trace=msg_trace,
+                        )
+                    if not ran_agent:
+                        await self._run_chat_graph_turn(text, from_user, context_token)
             else:
-                await _legacy_runner()
+                ran_agent = False
+                if (
+                    build_fast_unified_decision(text, from_user, self._todo_queues) is None
+                    and self._is_wx_agent_user(from_user)
+                ):
+                    ran_agent = await self._handle_wx_opencode_agent(
+                        from_user=from_user,
+                        text=text,
+                        context_token=context_token,
+                        msg_trace=msg_trace,
+                    )
+                if not ran_agent:
+                    await self._run_chat_graph_turn(text, from_user, context_token)
         except Exception as e:
             print(f"[Bot] error: {e}")
             if self.cfg["bot"].get("reply_on_error", True):
                 await self.wx.send_text(f"处理出错: {str(e)[:100]}", from_user, context_token)
         finally:
             await self.wx.set_typing(to_user=from_user, status=2, context_token=context_token)
+        if self._unified_chat_mode_enabled():
+            self._bg_events.prune_expired()
+            if self._bg_events.has_immediate():
+                await self.signal_trigger()

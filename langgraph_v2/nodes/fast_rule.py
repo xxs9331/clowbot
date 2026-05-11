@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from utils.route_fast import build_fast_unified_decision
+
 from ..state import ClawBotState
 
 
@@ -15,6 +17,12 @@ def _split_tasks(text: str) -> list[str]:
 
 async def fast_rule(state: ClawBotState) -> ClawBotState:
     text = str(state.get("text") or "")
+    uid = str(state.get("from_user") or "")
+    qs = list(state.get("queue_snapshot") or [])
+    fake_queues = {uid: {"tasks": qs, "idx": 0}} if qs else {}
+    fd = build_fast_unified_decision(text, uid, fake_queues)
+    if fd:
+        return {"decision": fd}
     low = text.lower()
     if text in ("做完了", "好了", "完成了", "done"):
         return {"decision": {"tool": "todo.done_current", "payload": {}, "reply": ""}}

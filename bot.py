@@ -63,6 +63,7 @@ async def main():
     remind_task = None
     checkin_task = None
     log_rotate_task = None
+    event_pump_task = None
 
     try:
         await acp.start()
@@ -84,6 +85,7 @@ async def main():
         if bool(tl.get("enabled")) and bool(tl.get("checkin_enabled")):
             checkin_task = asyncio.create_task(checkin_loop(h))
         log_rotate_task = asyncio.create_task(log_rotation_loop())
+        event_pump_task = asyncio.create_task(h._background_event_pump())
 
         print(f"[Bot] Ready ✓ 微信生活日志助手已启动")
         print(f"[Bot] 已提醒缓存数: {len(h._reminded_ids)}")
@@ -118,7 +120,7 @@ async def main():
                     print("[Bot] 重新登录失败，退出")
                     break
 
-                for task in (archive_task, remind_task, checkin_task, log_rotate_task):
+                for task in (archive_task, remind_task, checkin_task, log_rotate_task, event_pump_task):
                     if task:
                         task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -134,12 +136,13 @@ async def main():
                 else:
                     checkin_task = None
                 log_rotate_task = asyncio.create_task(log_rotation_loop())
+                event_pump_task = asyncio.create_task(h._background_event_pump())
                 print("[Bot] Ready ✓ 重新连接成功")
             else:
                 print("[Bot] 5秒后重试...")
                 await asyncio.sleep(5)
     finally:
-        for task in (archive_task, remind_task, checkin_task, log_rotate_task):
+        for task in (archive_task, remind_task, checkin_task, log_rotate_task, event_pump_task):
             if task:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
