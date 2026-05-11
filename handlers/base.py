@@ -162,6 +162,16 @@ class Handler(
         summary, _ids = self._bg_events.peek_compose_summary(max_items=max_items)
         return summary
 
+    def _has_pending_compose_events(self) -> bool:
+        """是否存在待在聊天表达层自然提及的后台事件。"""
+        if not self._unified_chat_mode_enabled():
+            return False
+        self._bg_events.prune_expired()
+        return bool(
+            self._bg_events.peek_events(priority="deferred")
+            or self._bg_events.peek_events(priority="silent")
+        )
+
     def _resolve_recent_target(self) -> tuple[str, str]:
         tok = getattr(self.wx, "_context_tokens", None) or {}
         if isinstance(tok, dict) and tok:
@@ -1505,6 +1515,7 @@ class Handler(
             if (
                 build_fast_unified_decision(text, from_user, self._todo_queues) is None
                 and self._is_wx_agent_user(from_user)
+                and not self._has_pending_compose_events()
             ):
                 ran_agent = await self._handle_wx_opencode_agent(
                     from_user=from_user,
@@ -1695,6 +1706,7 @@ class Handler(
                     if (
                         build_fast_unified_decision(text, from_user, self._todo_queues) is None
                         and self._is_wx_agent_user(from_user)
+                        and not self._has_pending_compose_events()
                     ):
                         ran_agent = await self._handle_wx_opencode_agent(
                             from_user=from_user,

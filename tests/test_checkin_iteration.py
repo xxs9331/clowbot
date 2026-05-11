@@ -37,6 +37,11 @@ class _Handler:
         self.wx = _Wx()
         self.session_id = ""
         self.acp = None
+        self.bg_events: list[dict] = []
+
+    def add_background_event(self, **kwargs) -> str:
+        self.bg_events.append(dict(kwargs))
+        return "evt-test"
 
 
 @pytest.fixture
@@ -137,3 +142,24 @@ def test_next_half_hour_not_skipped(checkin_cfg: dict) -> None:
 
     asyncio.run(run())
     assert len(h.wx.messages) == 2
+
+
+def test_unified_empty_slot_emits_immediate_event(checkin_cfg: dict) -> None:
+    set_state(checkin_cfg, "active")
+    checkin_cfg["bot"] = {"unified_chat_mode": True}
+    h = _Handler(checkin_cfg)
+    dt = datetime(2026, 5, 4, 10, 0, 0)
+
+    async def run() -> None:
+        await _checkin_iteration(h, now=dt)
+
+    asyncio.run(run())
+
+    assert len(h.wx.messages) == 0
+    assert len(h.bg_events) == 1
+    ev = h.bg_events[0]
+    assert ev.get("kind") == "checkin_slot_empty"
+    assert ev.get("priority") == "immediate"
+    exp = get_checkin_expect(checkin_cfg, "wx-user-1")
+    assert exp is not None
+    assert exp.get("slot") == "10:00"

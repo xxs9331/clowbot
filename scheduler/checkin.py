@@ -480,7 +480,7 @@ async def _checkin_iteration(handler, *, now: datetime | None = None) -> None:
             handler.add_background_event(
                 kind="checkin_slot_empty",
                 summary=f"{slot} 这半小时还没记录，可顺带补一句在做什么。",
-                priority="deferred",
+                priority="immediate",
                 ttl_sec=1800,
                 source="scheduler.checkin",
             )
