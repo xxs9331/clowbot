@@ -57,7 +57,7 @@ bot:
   reply_on_error: true           # 出错时告知用户
   typing_indicator: true         # 处理中显示"正在输入"
   max_reply_length: 2000         # 回复最大长度（微信限制）
-  unified_chat_mode: false
+  unified_chat_mode: true
   wx_agent_allowlist: ["*"]  # 或具体 wxid
   agent_model: ""  # 为空则沿用 opencode.model
   reminder_polish_enabled: true
