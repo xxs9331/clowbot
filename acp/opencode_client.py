@@ -1697,19 +1697,34 @@ def build_daily_summary_skill_binding(vault_root: str) -> str:
 
 
 def build_system_prompt(
-    vault_root: str, daily_log_dir: str, project_dir: str = "", task_dir: str = ""
+    vault_root: str,
+    daily_log_dir: str,
+    project_dir: str = "",
+    task_dir: str = "",
+    timeline_root_dir: str = "",
+    timeline_dir: str = "",
 ) -> str:
     todo_block = build_todo_coach_skill_binding(vault_root)
     decompose_block = build_task_decompose_skill_binding(vault_root)
     summary_block = build_daily_summary_skill_binding(vault_root)
     skill_block = f"{todo_block}\n\n{decompose_block}\n\n{summary_block}"
+    timeline_path = ""
+    if str(timeline_root_dir or "").strip() and str(timeline_dir or "").strip():
+        timeline_path = (
+            str(timeline_root_dir).rstrip("/\\")
+            + "/"
+            + str(timeline_dir).strip("/\\")
+            + "/YYYY/MM/YYYY-MM-DD.md"
+        )
+    timeline_rule = "；同时同步到同日时间轴对应半小时格" if timeline_path else ""
+    timeline_line = f"- 时间轴: {timeline_path}\n" if timeline_path else ""
     return f"""你是"生生项目"的生活日志助手。只处理生活相关的事，不处理工作/学术任务。
 
 ## 核心规则
 1. 文件三章节：`## 📝 记录` / `## ⏰ 提醒` / `## 📋 待办`
 2. 写入文件：{daily_log_dir}/YYYY/MM/YYYY-MM-DD.md
 3. 日期提取：消息中如有明确日期（如"5月2日"），写入对应日期文件，而非今天
-4. 📝 记录（已发生）→ 按分类分节 `### 身体/运动/阅读/事务` → `- [x] 内容 ✅HH:MM`
+4. 📝 记录（已发生）→ 按分类分节 `### 身体/运动/阅读/事务` → `- [x] 内容 ✅HH:MM`{timeline_rule}
 5. ⏰ 提醒（有目标时间）→ 平铺 → `- [ ] 目标时间：内容`
 6. 📋 待办：格式与催办流程 **不按「每项单独一行」的简化规则**；必须遵守技能 **todo-coach**（见下文「待办技能」），含分组书写、整组标记、采访式推进。
 7. `✅HH:MM`：📝 记录每条可带；⏰ 提醒行不带完成戳；📋 待办整组完成、行末时间等 **一律按 todo-coach**，勿套用「只有记录能带时间」的旧口诀
@@ -1722,6 +1737,7 @@ def build_system_prompt(
 ## 路径
 - vault 根: {vault_root}
 - 生活日志: {daily_log_dir}/YYYY/MM/YYYY-MM-DD.md
+{timeline_line}
 
 ## 日期识别
 - "N月N日" / "N.N" / "N月N号" → 当前年份的该日期

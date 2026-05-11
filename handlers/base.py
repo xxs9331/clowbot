@@ -184,6 +184,62 @@ class Handler(
             return False
         return (time.monotonic() - self._last_user_msg_ts) < float(sec)
 
+    @staticmethod
+    def _coerce_background_reply(text: str) -> str:
+        """后台主动触达只允许发自然文本；模型误吐 JSON 时抽取 reply。"""
+        body = (text or "").strip()
+        if not body or not body.startswith("{"):
+            return body
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(obj, dict):
+            return body
+        reply = str(obj.get("reply") or "").strip()
+        return reply or body
+
+    @staticmethod
+    def _extract_slot_from_event_summary(summary: str) -> str:
+        """从事件摘要中抽取 HH:MM 槽位。"""
+        m = re.search(r"\b(\d{2}:\d{2})\b", str(summary or ""))
+        return str(m.group(1)) if m else ""
+
+    async def _render_immediate_event_message(self, top, user_id: str) -> str:
+        """生成 immediate 事件要发送的正文。"""
+        kind = str(getattr(top, "kind", "") or "")
+        if kind == "checkin_slot_empty":
+            slot = self._extract_slot_from_event_summary(getattr(top, "summary", ""))
+            if slot:
+                try:
+                    # 复用 checkin 富上下文提示词（时间轴/日志/聊天摘要）。
+                    from scheduler.checkin import _build_empty_slot_message
+
+                    msg = await _build_empty_slot_message(
+                        self,
+                        slot=slot,
+                        now_str=datetime.now().strftime("%H:%M"),
+                        wx_user_id=user_id,
+                    )
+                    coerced = self._coerce_background_reply(msg or "")
+                    if coerced:
+                        return coerced
+                except Exception:
+                    pass
+
+        prompt = (
+            "你是微信个人助手。请发一条自然中文短消息给用户（1~2句）。\n"
+            "这不是用户刚发来的消息，而是系统提醒事件。\n"
+            f"事件：{top.summary}\n"
+            "要求：自然、不生硬，不要罗列多个事项。只输出要发给用户的正文，禁止输出 JSON。"
+        )
+        reply, _ = await self.acp.prompt(
+            self.unified_session_id,
+            prompt,
+            trace_tag="background_signal",
+        )
+        return self._coerce_background_reply(reply or "")
+
     async def _background_event_pump(self) -> None:
         """后台事件泵：检测 immediate 事件并尝试主动触达。"""
         while True:
@@ -218,18 +274,7 @@ class Handler(
         if not user_id:
             return False
         top = events[0]
-        prompt = (
-            "你是微信个人助手。请发一条自然中文短消息给用户（1~2句）。\n"
-            "这不是用户刚发来的消息，而是系统提醒事件。\n"
-            f"事件：{top.summary}\n"
-            "要求：自然、不生硬，不要罗列多个事项。"
-        )
-        reply, _ = await self.acp.prompt(
-            self.unified_session_id,
-            prompt,
-            trace_tag="background_signal",
-        )
-        body = (reply or "").strip() or top.summary
+        body = (await self._render_immediate_event_message(top, user_id)) or top.summary
         await self.wx.send_text(body, user_id, context_token)
         self._append_conversation_assistant(user_id, body)
         self._bg_events.mark_consumed([top.id])
@@ -943,7 +988,13 @@ class Handler(
 
         # 域会话启动时一次性注入角色约束，后续写盘只传 JSON envelope。
         v = self.cfg["vault"]
-        sys_prompt = build_system_prompt(v["root"], v["daily_log_dir"])
+        tl = self.cfg.get("timeline") or {}
+        sys_prompt = build_system_prompt(
+            v["root"],
+            v["daily_log_dir"],
+            timeline_root_dir=str(tl.get("root_dir") or ""),
+            timeline_dir=str(tl.get("timeline_dir") or ""),
+        )
         prime_tasks = [
             self.acp.prompt(
                 self.todo_session_id,

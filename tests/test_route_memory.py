@@ -13,9 +13,19 @@ from tests.helpers import minimal_timeline, minimal_vault
 class _DummyWX:
     def __init__(self):
         self.sent: list[str] = []
+        self._context_tokens = {"u1": "ctx"}
+        self.user_id = "u1"
 
     async def send_text(self, text: str, _to: str, _token: str):
         self.sent.append(text)
+
+
+class _JsonReplyACP:
+    async def prompt(self, *_args, **_kwargs):
+        return (
+            '{"tool":"none","payload":{},"reply":"老板，23点半到24点这块还没记呢，这会儿在干啥呀~"}',
+            "",
+        )
 
 
 def _build_handler(tmp_path: Path) -> Handler:
@@ -60,6 +70,29 @@ def test_no_block_record_add_when_event_date_present():
 def test_no_block_non_record_intent():
     obj = {"intent": "todo_done", "slots": {}, "confidence": 0.99}
     assert Handler._block_intent_short_circuit(obj, "搞定", {"record_high_conf_short_circuit": False}) is False
+
+
+def test_background_signal_extracts_reply_from_json():
+    r = "."
+    wx = _DummyWX()
+    cfg = {
+        "vault": {
+            **minimal_vault(r),
+            "daily_log_dir": "2-Areas/习惯养成/生活日志",
+        },
+        "timeline": minimal_timeline(r),
+        "bot": {"unified_chat_mode": True},
+    }
+    h = Handler(acp=_JsonReplyACP(), config=cfg, wechat=wx)  # type: ignore[arg-type]
+    h.unified_session_id = "sid"
+    h.add_background_event(
+        kind="checkin_slot_empty",
+        summary="23:30 这半小时还没记录，可顺带补一句在做什么。",
+        priority="immediate",
+    )
+
+    assert asyncio.run(h._signal_trigger_immediate()) is True
+    assert wx.sent == ["老板，23点半到24点这块还没记呢，这会儿在干啥呀~"]
 
 
 def test_spill_large_payload_for_memory(tmp_path: Path):
