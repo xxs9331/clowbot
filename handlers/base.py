@@ -226,6 +226,11 @@ class Handler(
                         return coerced
                 except Exception:
                     pass
+        elif kind == "daily_briefing":
+            # 晨报 summary 已是最终正文，优先直发，避免二次改写口吻。
+            body = self._coerce_background_reply(str(getattr(top, "summary", "") or ""))
+            if body:
+                return body
 
         prompt = (
             "你是微信个人助手。请发一条自然中文短消息给用户（1~2句）。\n"

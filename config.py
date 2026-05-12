@@ -135,6 +135,50 @@ def collect_config_errors(cfg: dict) -> list[str]:
         if ucm is not None and not isinstance(ucm, bool):
             errors.append("bot.unified_chat_mode must be true or false if set")
 
+    briefing = cfg.get("briefing", None)
+    if briefing is not None and not isinstance(briefing, dict):
+        errors.append("briefing must be a mapping")
+    elif isinstance(briefing, dict):
+        enabled = briefing.get("enabled", None)
+        if enabled is not None and not isinstance(enabled, bool):
+            errors.append("briefing.enabled must be true or false if set")
+        if bool(briefing.get("enabled", False)):
+            try:
+                h = int(briefing.get("push_hour"))
+            except (TypeError, ValueError):
+                errors.append("briefing.push_hour must be an integer")
+            else:
+                if h < 0 or h > 23:
+                    errors.append("briefing.push_hour must be between 0 and 23")
+            try:
+                m = int(briefing.get("push_minute"))
+            except (TypeError, ValueError):
+                errors.append("briefing.push_minute must be an integer")
+            else:
+                if m < 0 or m > 59:
+                    errors.append("briefing.push_minute must be between 0 and 59")
+
+            weather = briefing.get("weather")
+            if not isinstance(weather, dict):
+                errors.append("briefing.weather must be a mapping when briefing.enabled=true")
+            else:
+                if not str(weather.get("api_host") or "").strip():
+                    errors.append("briefing.weather.api_host is required when briefing.enabled=true")
+                if not str(weather.get("location") or "").strip():
+                    errors.append("briefing.weather.location is required when briefing.enabled=true")
+                indices = weather.get("indices", None)
+                if indices is not None:
+                    if not isinstance(indices, list):
+                        errors.append("briefing.weather.indices must be a list of integers")
+                    else:
+                        if len(indices) == 0:
+                            errors.append("briefing.weather.indices must not be empty")
+                        for i, item in enumerate(indices):
+                            try:
+                                int(item)
+                            except (TypeError, ValueError):
+                                errors.append(f"briefing.weather.indices[{i}] must be an integer")
+
     return errors
 
 

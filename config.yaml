@@ -61,3 +61,13 @@ bot:
   wx_agent_allowlist: ["*"]  # 或具体 wxid
   agent_model: ""  # 为空则沿用 opencode.model
   reminder_polish_enabled: true
+
+# ─── 每日晨报 ───
+briefing:
+  enabled: true
+  push_hour: 23
+  push_minute: 12
+  weather:
+    api_host: "https://jy54e62h5y.re.qweatherapi.com"
+    location: "108.08,34.27"
+    indices: [3, 1, 5, 8, 9]

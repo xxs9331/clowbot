@@ -39,6 +39,7 @@ from acp.opencode_client import OpenCodeACP
 from config import load_config
 from handlers import Handler
 from scheduler.archive import auto_archive_loop
+from scheduler.briefing import briefing_loop
 from scheduler.checkin import checkin_loop
 from scheduler.log_rotation import log_rotation_loop
 from scheduler.reminders import remind_check_loop
@@ -62,6 +63,7 @@ async def main():
     archive_task = None
     remind_task = None
     checkin_task = None
+    brief_task = None
     log_rotate_task = None
     event_pump_task = None
 
@@ -81,6 +83,7 @@ async def main():
 
         archive_task = asyncio.create_task(auto_archive_loop(acp, config, h))
         remind_task = asyncio.create_task(remind_check_loop(h))
+        brief_task = asyncio.create_task(briefing_loop(h))
         tl = (config.get("timeline") or {})
         if bool(tl.get("enabled")) and bool(tl.get("checkin_enabled")):
             checkin_task = asyncio.create_task(checkin_loop(h))
@@ -120,7 +123,7 @@ async def main():
                     print("[Bot] 重新登录失败，退出")
                     break
 
-                for task in (archive_task, remind_task, checkin_task, log_rotate_task, event_pump_task):
+                for task in (archive_task, remind_task, checkin_task, brief_task, log_rotate_task, event_pump_task):
                     if task:
                         task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -130,6 +133,7 @@ async def main():
                 await h.init_session()
                 archive_task = asyncio.create_task(auto_archive_loop(acp, config, h))
                 remind_task = asyncio.create_task(remind_check_loop(h))
+                brief_task = asyncio.create_task(briefing_loop(h))
                 tl2 = (config.get("timeline") or {})
                 if bool(tl2.get("enabled")) and bool(tl2.get("checkin_enabled")):
                     checkin_task = asyncio.create_task(checkin_loop(h))
@@ -142,7 +146,7 @@ async def main():
                 print("[Bot] 5秒后重试...")
                 await asyncio.sleep(5)
     finally:
-        for task in (archive_task, remind_task, checkin_task, log_rotate_task, event_pump_task):
+        for task in (archive_task, remind_task, checkin_task, brief_task, log_rotate_task, event_pump_task):
             if task:
                 task.cancel()
                 with suppress(asyncio.CancelledError):

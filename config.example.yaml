@@ -105,6 +105,16 @@ bot:
   # 全能力 agent 会话模型（为空则沿用 opencode.model）
   agent_model: ""
 
+# ─── 每日晨报（可选） ───
+briefing:
+  enabled: false
+  push_hour: 7
+  push_minute: 0
+  weather:
+    api_host: "https://YOUR_QWEATHER_HOST.re.qweatherapi.com"
+    location: "108.08,34.27"
+    indices: [3, 1, 5, 8, 9]
+
 # ─── Agent 可靠性 ───
 agent:
   # 跨消息连续自动执行步数上限；超过则强制中断，需人工介入

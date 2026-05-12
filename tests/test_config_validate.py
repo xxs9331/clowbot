@@ -150,3 +150,52 @@ def test_collect_errors_graph_section_ignored():
         "graph": {"enabled": False, "shadow_mode": True, "rollout_rate": 9.9},
     }
     assert collect_config_errors(cfg) == []
+
+
+def test_collect_errors_briefing_enabled_missing_weather_location():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": minimal_timeline("/x"),
+        "briefing": {
+            "enabled": True,
+            "push_hour": 7,
+            "push_minute": 0,
+            "weather": {"api_host": "https://api.test.local", "location": ""},
+        },
+    }
+    errs = collect_config_errors(cfg)
+    assert any("briefing.weather.location" in e for e in errs)
+
+
+def test_collect_errors_briefing_enabled_push_hour_invalid():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": minimal_timeline("/x"),
+        "briefing": {
+            "enabled": True,
+            "push_hour": 25,
+            "push_minute": 0,
+            "weather": {"api_host": "https://api.test.local", "location": "108.08,34.27"},
+        },
+    }
+    errs = collect_config_errors(cfg)
+    assert any("briefing.push_hour" in e for e in errs)
+
+
+def test_collect_errors_briefing_enabled_ok_without_api_key_in_yaml():
+    cfg = {
+        "vault": minimal_vault("/x"),
+        "timeline": minimal_timeline("/x"),
+        "briefing": {
+            "enabled": True,
+            "push_hour": 7,
+            "push_minute": 0,
+            "weather": {
+                "api_host": "https://api.test.local",
+                "location": "108.08,34.27",
+                "indices": [3, 1, 5],
+            },
+        },
+    }
+    errs = collect_config_errors(cfg)
+    assert not any("api_key" in e for e in errs)
