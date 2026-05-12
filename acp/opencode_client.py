@@ -1574,6 +1574,7 @@ class OpenCodeACP:
         *,
         trace_tag: str = "prompt_with_image",
         log_model: Optional[str] = None,
+        timeout_sec: float = 180,
     ) -> tuple:
         """发送文本+图片（base64 内联），返回 (reply_text, reasoning_text)
 
@@ -1596,8 +1597,11 @@ class OpenCodeACP:
                 "session/prompt",
                 self._build_prompt_params(session_id, prompt_parts),
             )
+            timeout = float(timeout_sec or 180)
+            if timeout <= 0:
+                timeout = 180
             collected = await self._collect_prompt_response(
-                msg_id, session_id=session_id, timeout=180
+                msg_id, session_id=session_id, timeout=timeout
             )
         if self.reply_merge_enabled:
             reply, merge_meta = self._merge_stream_and_result_reply(
