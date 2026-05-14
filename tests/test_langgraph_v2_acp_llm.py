@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from acp.opencode_client import OpenCodeACP
+import langgraph_v2.adapters.acp_llm as acp_llm_module
 from langgraph_v2.adapters.acp_llm import ACPStructuredLLM, UnifiedDecideLLM
 
 
@@ -128,3 +129,34 @@ def test_unified_decide_includes_intent_hint_block():
     msg = acp.structured_calls[0]["message"]
     assert "intent_hint_json" in msg
     assert "todo_add" in msg
+
+
+def test_unified_decide_logs_structured_reply_stripped_with_trace():
+    acp = _FakeACP()
+    # raw reply 非空，但经 unescape + strip 后为空，触发 structured_reply_stripped
+    acp.structured_results = [{"tool": "none", "payload": {}, "reply": "\\n"}]
+    acp.prompt_results = ["补一条回复"]
+    llm = UnifiedDecideLLM(acp=acp, session_id="sid-u", retry_count=2)
+    captured: list[dict] = []
+
+    old_logger = acp_llm_module.log_flow_event
+    acp_llm_module.log_flow_event = lambda **kw: captured.append(dict(kw))
+    try:
+        out = _run(
+            llm.structured_decide(
+                user_id="u1",
+                text="你好",
+                queue_snapshot=[],
+                msg_trace="trace-xyz-001",
+            )
+        )
+    finally:
+        acp_llm_module.log_flow_event = old_logger
+
+    assert out.tool == "none"
+    assert out.reply == "补一条回复"
+    hits = [x for x in captured if x.get("route") == "structured_reply_stripped"]
+    assert len(hits) == 1
+    extra = hits[0].get("extra") if isinstance(hits[0].get("extra"), dict) else {}
+    assert extra.get("msg_trace") == "trace-xyz-001"
+    assert extra.get("raw_reply_preview") == "\\n"

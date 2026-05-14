@@ -19,6 +19,7 @@ class LLMProvider(Protocol):
         text: str,
         queue_snapshot: list[str],
         intent_hint: dict[str, Any] | None = None,
+        msg_trace: str = "",
     ) -> Decision:
         ...
 

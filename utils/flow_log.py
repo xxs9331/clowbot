@@ -62,6 +62,7 @@ def log_flow_event(
     route: str,
     user_text: str = "",
     from_user: str = "",
+    request_id: str = "",
     session_id: str = "",
     extra: dict | None = None,
 ) -> None:
@@ -76,6 +77,8 @@ def log_flow_event(
         lines.append(f"  user: {_snip(user_text, 300)}")
     if from_user:
         lines.append(f"  from: {_mask_user(from_user)}")
+    if request_id:
+        lines.append(f"  request_id: {request_id}")
     if session_id:
         lines.append(f"  session: {_short_sid(session_id)}")
     if extra:

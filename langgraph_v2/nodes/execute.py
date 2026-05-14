@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from utils.node_log import log_node_entry
 from utils.refresh_hooks import run_post_write_hooks
 
 from ..services import DomainServices
@@ -41,6 +42,7 @@ def _normalize_payload_for_execute(tool: str, payload: dict, user_text: str) -> 
 
 
 async def execute(state: ClawBotState, services: DomainServices) -> ClawBotState:
+    log_node_entry(state, "execute")
     decision = state.get("decision") or {}
     tool = str(decision.get("tool") or "none")
     payload = decision.get("payload")
@@ -68,4 +70,3 @@ async def execute(state: ClawBotState, services: DomainServices) -> ClawBotState
                 reply_preview=str(decision.get("reply") or "")[:240],
             )
     return {"handled": handled, "tool_result": str(out or "")}
-

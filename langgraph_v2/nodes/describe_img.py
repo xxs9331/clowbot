@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from utils.node_log import log_node_entry
+
 from ..state import ClawBotState
 
 
 async def describe_img(state: ClawBotState, deps) -> ClawBotState:
+    log_node_entry(state, "describe_img")
     img = str(state.get("image_base64") or "").strip()
     if not img:
         return {}
@@ -21,4 +24,3 @@ async def describe_img(state: ClawBotState, deps) -> ClawBotState:
     if caption:
         composed = f"{composed}\n附言：{caption}"
     return {"text": composed}
-

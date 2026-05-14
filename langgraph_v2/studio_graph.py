@@ -38,8 +38,9 @@ class _StudioFakeLLM:
         text: str,
         queue_snapshot: list[str],
         intent_hint: dict | None = None,
+        msg_trace: str = "",
     ) -> Decision:
-        _ = text, queue_snapshot
+        _ = text, queue_snapshot, msg_trace
         self.calls += 1
         self.last_intent_hint = intent_hint
         return self.decision

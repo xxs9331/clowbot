@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from utils.flow_log import log_flow_event
 from utils.llm_reply_unescape import unescape_llm_visible_newlines
+from utils.node_log import log_node_entry
 
 from ..state import ClawBotState
 
 
 async def compose(state: ClawBotState) -> ClawBotState:
+    log_node_entry(state, "compose")
     decision = state.get("decision") or {}
     if not decision or "tool" not in decision:
         log_flow_event(

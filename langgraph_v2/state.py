@@ -13,6 +13,7 @@ class ClawBotState(TypedDict, total=False):
     agent_mode: bool
 
     # Intermediate
+    request_id: str
     msg_trace: str
     command_kind: str
     intent_hint: dict[str, Any]

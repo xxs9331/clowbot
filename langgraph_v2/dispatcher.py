@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Awaitable, Callable
 
 from utils.flow_log import log_flow_event
@@ -17,6 +18,8 @@ class ChatGraphDispatcher:
         text: str,
         from_user: str,
         context_token: str,
+        request_id: str = "",
+        msg_trace: str = "",
         image_base64: str = "",
         image_mime: str = "",
         queue_snapshot: list[str] | None = None,
@@ -31,6 +34,8 @@ class ChatGraphDispatcher:
             "context_token": context_token,
             "agent_mode": agent_mode,
             "queue_snapshot": qs,
+            "request_id": request_id,
+            "msg_trace": msg_trace,
         }
         out = await self._graph.ainvoke(payload)
         return out if isinstance(out, dict) else {}
@@ -55,11 +60,15 @@ class ChatGraphDispatcher:
         agent_mode: bool = False,
     ) -> dict:
         """执行图并发送首条可见回复；返回最终 state（供评测/结构化状态更新）。"""
+        request_id = uuid.uuid4().hex
+        msg_trace = request_id[:12]
         try:
             state = await self.ainvoke_graph(
                 text=text,
                 from_user=from_user,
                 context_token=context_token,
+                request_id=request_id,
+                msg_trace=msg_trace,
                 image_base64=image_base64,
                 image_mime=image_mime,
                 queue_snapshot=queue_snapshot,
@@ -71,15 +80,30 @@ class ChatGraphDispatcher:
             else:
                 await send_text("处理完成。", from_user, context_token)
                 reply = "处理完成。"
-            return {**state, "_dispatch_reply_sent": reply}
+            return {
+                **state,
+                "request_id": str(state.get("request_id") or request_id),
+                "msg_trace": str(state.get("msg_trace") or msg_trace),
+                "_dispatch_reply_sent": reply,
+            }
         except Exception as e:  # noqa: BLE001
             log_flow_event(
                 stage="graph",
                 route="dispatch_failed",
                 user_text=text[:200],
                 from_user=from_user,
-                extra={"error": str(e)[:200]},
+                request_id=request_id,
+                extra={
+                    "msg_trace": msg_trace,
+                    "request_id": request_id,
+                    "error": str(e)[:200],
+                },
             )
             err_reply = f"处理出错: {str(e)[:100]}"
             await send_text(err_reply, from_user, context_token)
-            return {"error": str(e), "_dispatch_reply_sent": err_reply}
+            return {
+                "request_id": request_id,
+                "msg_trace": msg_trace,
+                "error": str(e),
+                "_dispatch_reply_sent": err_reply,
+            }

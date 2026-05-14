@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from utils.node_log import log_node_entry
+
 from ..state import ClawBotState
 
 
 async def local_view(state: ClawBotState, deps) -> ClawBotState:
+    log_node_entry(state, "local_view")
     cmd = str(state.get("command_kind") or "")
     view_map = {
         "待办": "todo",

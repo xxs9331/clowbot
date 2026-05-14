@@ -205,6 +205,7 @@ class UnifiedDecideLLM:
         text: str,
         queue_snapshot: list[str],
         intent_hint: dict[str, Any] | None = None,
+        msg_trace: str = "",
     ) -> Decision:
         _ = user_id
         bg_summary = self._background_summary() if self._in_unified_chat_mode() else ""
@@ -231,7 +232,8 @@ class UnifiedDecideLLM:
                         route="structured_reply_stripped",
                         from_user=user_id,
                         extra={
-                            "msg_trace": raw_reply_in_d[:200],
+                            "msg_trace": msg_trace,
+                            "raw_reply_preview": raw_reply_in_d[:200],
                             "raw_reply_len": len(raw_reply_in_d),
                             "coalesced_reply_len": len(str(reply or "")),
                             "d_keys": list(d.keys()),

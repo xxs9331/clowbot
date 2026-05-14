@@ -40,6 +40,12 @@ def test_chat_graph_dispatcher_sends_reply_and_passes_queue_snapshot():
     assert sent == ["hi"]
     assert len(graph.calls) == 1
     assert graph.calls[0]["queue_snapshot"] == ["a", "b"]
+    rid = str(graph.calls[0].get("request_id") or "")
+    mt = str(graph.calls[0].get("msg_trace") or "")
+    assert len(rid) == 32
+    assert mt == rid[:12]
+    assert state.get("request_id") == rid
+    assert state.get("msg_trace") == mt
     assert state.get("_dispatch_reply_sent") == "hi"
 
 

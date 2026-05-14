@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from utils.node_log import log_node_entry
 from utils.route_fast import build_fast_unified_decision
 
 from ..state import ClawBotState
@@ -16,6 +17,7 @@ def _split_tasks(text: str) -> list[str]:
 
 
 async def fast_rule(state: ClawBotState) -> ClawBotState:
+    log_node_entry(state, "fast_rule")
     text = str(state.get("text") or "")
     uid = str(state.get("from_user") or "")
     qs = list(state.get("queue_snapshot") or [])
