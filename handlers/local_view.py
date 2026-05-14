@@ -4,7 +4,6 @@ import re
 import time
 from pathlib import Path
 
-from acp.opencode_client import build_system_prompt
 from config import _log_reasoning
 from utils.log_sync import get_log_path
 from utils.section_reader import extract_section_text
@@ -205,12 +204,6 @@ class LocalViewMixin:
         try:
             vault = self.cfg["vault"]
             log_path = self._get_today_log_path()
-            system_prefix = build_system_prompt(
-                vault_root=vault["root"],
-                daily_log_dir=vault["daily_log_dir"],
-                project_dir=vault.get("project_dir", ""),
-                task_dir=vault.get("task_dir", ""),
-            )
             kind_hint = {
                 "log": "全文日志",
                 "record": "「记录」节",
@@ -220,7 +213,7 @@ class LocalViewMixin:
                 "brief": "今日简报（记录条数、未完成提醒/待办统计）",
             }.get(kind, kind)
             prompt = (
-                f"{system_prefix}\n"
+                "你是'生生项目'的生活日志助手。\n"
                 f"用户想查看今日日记的本地内容，但程序读取文件失败（类型：{kind_hint}）。\n"
                 f"文件路径：{log_path}\n"
                 f"用户原话：「{user_text}」\n"

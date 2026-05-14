@@ -44,3 +44,4 @@ timeline_checkin_state.json
 
 .venv-langgraph*
 .langgraph*
+tests/*

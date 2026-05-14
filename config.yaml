@@ -65,8 +65,8 @@ bot:
 # ─── 每日晨报 ───
 briefing:
   enabled: true
-  push_hour: 23
-  push_minute: 12
+  push_hour: 7
+  push_minute: 30
   weather:
     api_host: "https://jy54e62h5y.re.qweatherapi.com"
     location: "108.08,34.27"

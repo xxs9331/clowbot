@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from acp.opencode_client import OpenCodeACP
+from acp.opencode_client import OpenCodeACP, build_system_prompt
 
 
 def test_build_prompt_params_includes_max_tokens_by_default():
@@ -18,6 +18,25 @@ def test_build_prompt_params_omits_max_tokens_when_disabled():
     params = acp._build_prompt_params("sid-2", [{"type": "text", "text": "hi"}])
     assert params["sessionId"] == "sid-2"
     assert "maxTokens" not in params
+
+
+def test_build_system_prompt_keeps_required_sections_after_slim():
+    prompt = build_system_prompt(
+        vault_root="D:/vault",
+        daily_log_dir="logs",
+        timeline_root_dir="D:/vault",
+        timeline_dir="时间轴",
+    )
+    assert "## 📝 记录" in prompt
+    assert "## ⏰ 提醒" in prompt
+    assert "## 📋 待办" in prompt
+    assert "YYYY/MM/YYYY-MM-DD.md" in prompt
+    assert "todo-coach" in prompt.lower()
+    assert "task-decompose" in prompt.lower()
+    assert "daily-summary" in prompt.lower()
+    assert "多轮协商后再写入/导入" in prompt
+    assert "读取今日生活日志，汇总记录/待办/提醒，只读不写" in prompt
+    assert len(prompt) < 1200
 
 
 def test_merge_stream_prefix_prefers_longer_result():
